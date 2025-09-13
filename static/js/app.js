@@ -289,6 +289,58 @@ function wireTimeOff() {
   });
 }
 
+function applyTimeOffUIUpdate(name, fromIso, toIso, approved) {
+  if (!name || !fromIso || !toIso) return;
+  const from = new Date(fromIso);
+  const to = new Date(toIso);
+  const allCells = document.querySelectorAll(`.cell[data-employee="${name}"] select`);
+  allCells.forEach(sel => {
+    const cell = sel.closest('.cell');
+    const dk = cell.getAttribute('data-date');
+    if (!dk) return;
+    const d = new Date(dk);
+    if (d >= from && d <= to) {
+      if (approved) {
+        // Ensure TIME OFF option exists, then set
+        if (![...sel.options].some(o => o.value === 'TIME OFF')) {
+          const opt = document.createElement('option');
+          opt.value = 'TIME OFF';
+          opt.textContent = 'TIME OFF';
+          sel.insertBefore(opt, sel.firstChild);
+        }
+        sel.value = 'TIME OFF';
+      } else {
+        if (sel.value === 'TIME OFF') sel.value = 'Set';
+      }
+      updateSelectClass(sel, cell.getAttribute('data-section'), sel.value);
+    }
+  });
+}
+
+function initLiveUpdates() {
+  try {
+    const es = new EventSource('/events');
+    es.addEventListener('message', (evt) => {
+      if (!evt?.data) return;
+      let payload;
+      try { payload = JSON.parse(evt.data); } catch (_) { return; }
+      if (payload?.type === 'timeoff' && payload?.item) {
+        const it = payload.item;
+        // Update UI for affected employee/date range
+        applyTimeOffUIUpdate(it.name, it.from, it.to, !!it.approved);
+        // Update coverage UI if included
+        if (payload.counts) {
+          updateCoverageUI(payload);
+        }
+        updateConflictsUI();
+      }
+    });
+  } catch (e) {
+    // SSE may be unsupported; fail silently
+    console.warn('Live updates unavailable', e);
+  }
+}
+
 function wireWeekNav() {
   const prev = document.getElementById('prev-week');
   const next = document.getElementById('next-week');
@@ -341,6 +393,7 @@ window.confirmGenerateSchedule = confirmGenerateSchedule;
 document.addEventListener('DOMContentLoaded', () => {
   wireShiftSelects();
   wireTimeOff();
+  initLiveUpdates();
   wireWeekNav();
   wireGenerateSchedule();
   initSelectColors();

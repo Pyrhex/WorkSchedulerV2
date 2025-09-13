@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 import io
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for, send_file, Response
+from flask import stream_with_context
 import re
 from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -1179,9 +1180,10 @@ def timeoff_new():
     with SessionLocal() as s:
         emp = s.scalar(select(Employee).where(Employee.name == name))
         role = s.get(Section, emp.section_id).name if emp else 'Unknown'
-        s.add(TimeOff(name=name, role=role, from_date=from_d, to_date=to_d, approved=approved, vacation=vacation))
+        rec = TimeOff(name=name, role=role, from_date=from_d, to_date=to_d, approved=approved, vacation=vacation)
+        s.add(rec)
         s.commit()
-        # If approved, update assignments for current week
+        # If approved, update assignments for current week and broadcast
         if approved:
             week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
             if emp and week:
@@ -1191,6 +1193,32 @@ def timeoff_new():
                         if a:
                             a.value = TIME_OFF_LABEL
                 s.commit()
+                counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+                _broadcast({
+                    "type": "timeoff",
+                    "op": "new",
+                    "item": {
+                        "id": rec.id,
+                        "name": rec.name,
+                        "role": rec.role,
+                        "from": rec.from_date.isoformat(),
+                        "to": rec.to_date.isoformat(),
+                        "approved": True,
+                        "vacation": bool(getattr(rec, "vacation", False)),
+                    },
+                    "counts": counts,
+                    "missing": missing,
+                    "required": required,
+                    "variant_counts": variant_counts,
+                    "shuttle_missing": shuttle_missing,
+                    "shuttle_required": shuttle_required,
+                    "shuttle_counts": shuttle_counts,
+                    "bb_missing": bb_missing,
+                    "bb_required": bb_required,
+                    "bb_counts": bb_counts,
+                    "fd_duplicates": fd_duplicates,
+                    "double_booked": double_booked_snapshot(week.id),
+                })
     return redirect(url_for('timeoff_page'))
 
 
@@ -1338,6 +1366,32 @@ def delete_timeoff(tid):
         # Only update coverage if we have a valid week
         if week:
             counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+            # Broadcast deletion to live listeners
+            _broadcast({
+                "type": "timeoff",
+                "op": "delete",
+                "item": {
+                    "id": tid,
+                    "name": to.name,
+                    "role": to.role,
+                    "from": to.from_date.isoformat(),
+                    "to": to.to_date.isoformat(),
+                    "approved": bool(to.approved),
+                    "vacation": bool(getattr(to, "vacation", False)),
+                },
+                "counts": counts,
+                "missing": missing,
+                "required": required,
+                "variant_counts": variant_counts,
+                "shuttle_missing": shuttle_missing,
+                "shuttle_required": shuttle_required,
+                "shuttle_counts": shuttle_counts,
+                "bb_missing": bb_missing,
+                "bb_required": bb_required,
+                "bb_counts": bb_counts,
+                "fd_duplicates": fd_duplicates,
+                "double_booked": double_booked_snapshot(week.id),
+            })
             return jsonify({
                 "ok": True,
                 "counts": counts,
@@ -1381,7 +1435,7 @@ def toggle_timeoff():
                 elif not approved and a.value == TIME_OFF_LABEL and in_range:
                     a.value = "Set"
         s.commit()
-        counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts = coverage_snapshot_db(week.id)
+        counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
         item = {
             "id": to.id,
             "name": to.name,
@@ -1390,6 +1444,27 @@ def toggle_timeoff():
             "to": to.to_date.isoformat(),
             "approved": to.approved,
         }
+        # Broadcast to live listeners
+        _broadcast({
+            "type": "timeoff",
+            "op": "toggle",
+            "item": {
+                **item,
+                "vacation": bool(getattr(to, "vacation", False)),
+            },
+            "counts": counts,
+            "missing": missing,
+            "required": required,
+            "variant_counts": variant_counts,
+            "shuttle_missing": shuttle_missing,
+            "shuttle_required": shuttle_required,
+            "shuttle_counts": shuttle_counts,
+            "bb_missing": bb_missing,
+            "bb_required": bb_required,
+            "bb_counts": bb_counts,
+            "fd_duplicates": fd_duplicates,
+            "double_booked": double_booked_snapshot(week.id),
+        })
     return jsonify({
         "ok": True,
         "item": item,
@@ -1561,6 +1636,51 @@ def _ensure_week_and_assignments(s: Session, start_d: date) -> Week:
                 s.add(Assignment(week_id=wk.id, employee_id=emp.id, date=d, value="Set"))
     s.commit()
     return wk
+
+
+# ---- Simple SSE broadcaster for live updates ----
+import json
+from queue import Queue
+from threading import Lock
+
+_listeners: list[Queue] = []
+_listeners_lock = Lock()
+
+
+def _broadcast(event: dict):
+    data = json.dumps(event)
+    with _listeners_lock:
+        for q in list(_listeners):
+            try:
+                q.put(data, block=False)
+            except Exception:
+                # Best-effort; drop if enqueue fails
+                pass
+
+
+@app.route("/events")
+def sse_events():
+    q: Queue = Queue()
+    with _listeners_lock:
+        _listeners.append(q)
+
+    def gen():
+        try:
+            while True:
+                msg = q.get()
+                yield f"data: {msg}\n\n"
+        finally:
+            with _listeners_lock:
+                if q in _listeners:
+                    _listeners.remove(q)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",  # for some proxies
+        "Content-Type": "text/event-stream",
+        "Connection": "keep-alive",
+    }
+    return Response(stream_with_context(gen()), headers=headers)
 
 
 def _build_availability_index(s: Session) -> dict[int, set[tuple[int, str]]]:
