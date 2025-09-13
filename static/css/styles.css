@@ -97,6 +97,8 @@ body {
 .head-date { font-weight: 700; }
 .head-count { font-size: 12px; color: var(--muted); }
 .head.missing { background: #fef2f2; color: #991b1b; }
+.head.duplicate { background: #fffbeb; color: #92400e; }
+.duplicate { outline: 2px dashed #f59e0b; outline-offset: -4px; }
 
 .shift-select { width: 100%; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--grid); background: white; font-size: 12px; height: 30px; }
 .shift-select.center { text-align-last: center; text-align: center; }

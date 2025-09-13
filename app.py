@@ -354,7 +354,7 @@ def has_generated_schedule(week_id: int) -> bool:
         return any_non_set is not None
 
 
-def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict]:
+def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict, dict]:
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         dates = [d.isoformat() for d in daterange(wk.start_date, 7)]
@@ -373,23 +373,37 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         bb_variants = ["5AM–12PM", "6AM–12PM", "7AM–12PM"]
         bb_counts = {k: {variant: 0 for variant in bb_variants} for k in dates}
         bb_missing = {k: False for k in dates}
+
+        # Track Front Desk duplicates of exact staggered times per variant (e.g., two at 2:15PM)
+        fd_duplicates = {k: False for k in dates}
+        # Exact label counts per date and variant for Front Desk
+        fd_label_counts: dict[str, dict[str, dict[str, int]]] = {k: {"AM": {}, "PM": {}, "Audit": {}} for k in dates}
         
         # Count Front Desk assignments per shift variant per day
         # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
         # regardless of primary role, to account for secondary-role coverage.
         rows = s.scalars(select(Assignment).where(Assignment.week_id == week_id))
-        
+
         for a in rows:
-            if a.value and a.value not in ("Set", TIME_OFF_LABEL):
-                date_key = a.date.isoformat()
-                # Determine which shift variant this assignment belongs to
+            if not a.value or a.value in ("Set", TIME_OFF_LABEL):
+                continue
+
+            date_key = a.date.isoformat()
+
+            # Front Desk variants: count ONLY if the value is a Front Desk label
+            if a.value in FRONT_DESK_SHIFTS:
                 if a.value.startswith("AM"):
                     counts[date_key]["AM"] += 1
+                    fd_label_counts[date_key]["AM"][a.value] = fd_label_counts[date_key]["AM"].get(a.value, 0) + 1
                 elif a.value.startswith("PM"):
                     counts[date_key]["PM"] += 1
+                    fd_label_counts[date_key]["PM"][a.value] = fd_label_counts[date_key]["PM"].get(a.value, 0) + 1
                 elif a.value.startswith("Audit"):
                     counts[date_key]["Audit"] += 1
-                # Shuttle variants (exact labels)
+                    fd_label_counts[date_key]["Audit"][a.value] = fd_label_counts[date_key]["Audit"].get(a.value, 0) + 1
+
+            # Shuttle variants: count ONLY if the value is a Shuttle label
+            if a.value in SHUTTLE_SHIFTS:
                 if a.value == "AM (3:30AM–11:30AM)":
                     sh_counts[date_key]["AM"] += 1
                 elif a.value.startswith("Midday"):
@@ -398,9 +412,10 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                     sh_counts[date_key]["PM"] += 1
                 elif a.value.startswith("Crew"):
                     sh_counts[date_key]["Crew"] += 1
-                # Breakfast variants (exact labels)
-                if a.value in bb_variants:
-                    bb_counts[date_key][a.value] += 1
+
+            # Breakfast variants (exact labels)
+            if a.value in bb_variants:
+                bb_counts[date_key][a.value] += 1
         
         # Check for missing coverage: each variant needs at least 2 people
         for date_key in dates:
@@ -408,6 +423,18 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 if counts[date_key][variant] < 2:
                     missing[date_key] = True
                     break
+
+        # Compute duplicate-stagger warnings for Front Desk per date
+        for date_key in dates:
+            dup_any = False
+            for variant in ("AM", "PM", "Audit"):
+                exact = fd_label_counts[date_key][variant]
+                total = sum(exact.values())
+                distinct = sum(1 for v in exact.values() if v > 0)
+                if total >= 2 and distinct == 1:
+                    dup_any = True
+                    break
+            fd_duplicates[date_key] = dup_any
         
         # For backward compatibility, also return total counts
         total_counts = {k: sum(counts[k].values()) for k in dates}
@@ -428,7 +455,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                     break
         bb_required = 3
 
-        return total_counts, missing, required, counts, sh_missing, sh_required, sh_counts, bb_missing, bb_required, bb_counts
+        return total_counts, missing, required, counts, sh_missing, sh_required, sh_counts, bb_missing, bb_required, bb_counts, fd_duplicates
 
 
 def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
@@ -616,7 +643,7 @@ def index():
     with SessionLocal() as s:
         week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
         ctx = build_week_context(week.id)
-    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts = coverage_snapshot_db(week.id)
+    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
     return render_template(
         "schedule.html",
         meta=ctx["meta"],
@@ -634,6 +661,7 @@ def index():
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
+        fd_duplicates=fd_duplicates,
         time_off=ctx["time_off"],
         vacation_days=ctx.get("vacation_days", {}),
         dismissed_days=ctx.get("dismissed_days", {}),
@@ -694,7 +722,7 @@ def format_shift(label: str) -> str:
 @app.route("/week/<int:week_id>")
 def view_week(week_id: int):
     ctx = build_week_context(week_id)
-    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts = coverage_snapshot_db(week_id)
+    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week_id)
     return render_template(
         "schedule.html",
         meta=ctx["meta"],
@@ -712,6 +740,7 @@ def view_week(week_id: int):
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
+        fd_duplicates=fd_duplicates,
         time_off=ctx["time_off"],
         vacation_days=ctx.get("vacation_days", {}),
         dismissed_days=ctx.get("dismissed_days", {}),
@@ -1242,7 +1271,7 @@ def assign():
             if a.value != TIME_OFF_LABEL:
                 a.value = TIME_OFF_LABEL
                 s.commit()
-            counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts = coverage_snapshot_db(week.id)
+            counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
             return jsonify({
                 "ok": False,
                 "error": "Approved time off",
@@ -1258,12 +1287,13 @@ def assign():
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
+                "fd_duplicates": fd_duplicates,
                 "double_booked": double_booked_snapshot(week.id),
             }), 409
         a.value = value
         s.commit()
 
-    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts = coverage_snapshot_db(week.id)
+    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
     return jsonify({
         "ok": True,
         "counts": counts,
@@ -1276,6 +1306,7 @@ def assign():
         "bb_missing": bb_missing,
         "bb_required": bb_required,
         "bb_counts": bb_counts,
+        "fd_duplicates": fd_duplicates,
         "double_booked": double_booked_snapshot(week.id),
     })
 
@@ -1306,7 +1337,7 @@ def delete_timeoff(tid):
         
         # Only update coverage if we have a valid week
         if week:
-            counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts = coverage_snapshot_db(week.id)
+            counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
             return jsonify({
                 "ok": True,
                 "counts": counts,
@@ -1319,6 +1350,7 @@ def delete_timeoff(tid):
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
+                "fd_duplicates": fd_duplicates,
                 "double_booked": double_booked_snapshot(week.id),
             })
         else:
@@ -1371,6 +1403,7 @@ def toggle_timeoff():
         "bb_missing": bb_missing,
         "bb_required": bb_required,
         "bb_counts": bb_counts,
+        "fd_duplicates": fd_duplicates,
         "double_booked": double_booked_snapshot(week.id),
     })
 
@@ -1442,27 +1475,50 @@ def generate_new_schedule_db(week_id: int):
             # AM
             am_eligible = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
             am = sample(am_eligible, k=min(2, len(am_eligible))) if am_eligible else []
+            # Senior earlier: sort by known seniority order
+            def _sen_rank_fd(eid: int) -> int:
+                name = s.get(Employee, eid).name if s.get(Employee, eid) else ''
+                # Exception: Ryan should be treated as least-preferred for earlier start
+                if name == 'Ryan':
+                    return 10000
+                try:
+                    return SENIORITY_ORDER.index(name)
+                except ValueError:
+                    return 9999
+            am.sort(key=_sen_rank_fd)
             for i, eid in enumerate(am):
                 pool.remove(eid)
                 a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
                 if a:
-                    a.value = "AM (6:00AM–2:00PM)" if i == 0 else "AM (6:15AM–2:15PM)"
+                    # If only Ryan was picked, give him the later stagger
+                    if len(am) == 1 and (s.get(Employee, eid).name if s.get(Employee, eid) else '') == 'Ryan':
+                        a.value = "AM (6:15AM–2:15PM)"
+                    else:
+                        a.value = "AM (6:00AM–2:00PM)" if i == 0 else "AM (6:15AM–2:15PM)"
             # PM
             pm_candidates = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
             pm = sample(pm_candidates, k=min(2, len(pm_candidates))) if pm_candidates else []
+            pm.sort(key=_sen_rank_fd)
             for i, eid in enumerate(pm):
                 pool.remove(eid)
                 a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
                 if a:
-                    a.value = "PM (2:00PM–10:00PM)" if i == 0 else "PM (2:15PM–10:15PM)"
+                    if len(pm) == 1 and (s.get(Employee, eid).name if s.get(Employee, eid) else '') == 'Ryan':
+                        a.value = "PM (2:15PM–10:15PM)"
+                    else:
+                        a.value = "PM (2:00PM–10:00PM)" if i == 0 else "PM (2:15PM–10:15PM)"
             # Audit
             au_candidates = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
             au = sample(au_candidates, k=min(2, len(au_candidates))) if au_candidates else []
+            au.sort(key=_sen_rank_fd)
             for i, eid in enumerate(au):
                 pool.remove(eid)
                 a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
                 if a:
-                    a.value = "Audit (10:00PM–6:00AM)" if i == 0 else "Audit (10:15PM–6:15AM)"
+                    if len(au) == 1 and (s.get(Employee, eid).name if s.get(Employee, eid) else '') == 'Ryan':
+                        a.value = "Audit (10:15PM–6:15AM)"
+                    else:
+                        a.value = "Audit (10:00PM–6:00AM)" if i == 0 else "Audit (10:15PM–6:15AM)"
 
         # Shuttle: one agent per variant per day (as available)
         for d in daterange(wk.start_date, 7):
@@ -1747,9 +1803,24 @@ def generate_4_week_schedule(start_week_id: int):
                         if pick is None:
                             break
                         picks.append(pick)
+                    # Senior earlier: ensure earlier stagger goes to more senior
+                    def _seniority_rank(eid: int) -> int:
+                        name = emp_name.get(eid, '')
+                        # Exception: Ryan should get the later stagger, so sort him last
+                        if name == 'Ryan':
+                            return 10000
+                        try:
+                            return SENIORITY_ORDER.index(name)
+                        except ValueError:
+                            return 9999
+                    picks.sort(key=_seniority_rank)
                     for i, eid in enumerate(picks):
                         pool.remove(eid)
-                        label = opts[i] if i < len(opts) else opts[-1]
+                        # If only Ryan was picked for this variant, give him the later stagger
+                        if len(picks) == 1 and emp_name.get(eid, '') == 'Ryan' and len(opts) > 1:
+                            label = opts[1]
+                        else:
+                            label = opts[i] if i < len(opts) else opts[-1]
                         a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == eid, Assignment.date == d))
                         if a:
                             a.value = label

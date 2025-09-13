@@ -83,7 +83,7 @@
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Employees</div>
             {% for d in week.dates %}
-              <div class="cell head {% if missing[d.key] %}missing{% endif %}" role="columnheader" data-date="{{ d.key }}" title="{{ d.label_long }}">
+              <div class="cell head {% if missing[d.key] %}missing{% elif fd_duplicates[d.key] %}duplicate{% endif %}" role="columnheader" data-date="{{ d.key }}" title="{{ d.label_long }}">
                 <div class="head-date">{{ d.label_short }}</div>
               </div>
             {% endfor %}

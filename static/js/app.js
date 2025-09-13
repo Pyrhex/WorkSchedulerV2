@@ -43,22 +43,54 @@ function initSelectColors() {
 }
 
 function updateCoverageUI(data) {
-  const { counts, missing, required, variant_counts } = data;
-  const headers = document.querySelectorAll('.schedule-table .row.header .cell.head');
-  headers.forEach(h => {
-    const dk = h.getAttribute('data-date');
-    if (!dk) return;
-    const countSpan = document.querySelector(`.count[data-count-for="${dk}"]`);
-    if (countSpan) countSpan.textContent = String(counts[dk] || 0);
-    if (missing[dk]) h.classList.add('missing'); else h.classList.remove('missing');
-  });
+  const {
+    counts,
+    missing,
+    required,
+    variant_counts,
+    shuttle_missing,
+    bb_missing,
+    fd_duplicates,
+  } = data;
 
-  // Only highlight header dates; do not mark individual cells as missing
+  // Update Front Desk headers using FD missing map
+  document
+    .querySelectorAll('.schedule-table[aria-label="Front Desk"] .row.header .cell.head[data-date]')
+    .forEach(h => {
+      const dk = h.getAttribute('data-date');
+      if (!dk) return;
+      const countSpan = document.querySelector(`.count[data-count-for="${dk}"]`);
+      if (countSpan) countSpan.textContent = String(counts?.[dk] || 0);
+      h.classList.remove('missing', 'duplicate');
+      if (missing?.[dk]) {
+        h.classList.add('missing');
+      } else if (fd_duplicates?.[dk]) {
+        h.classList.add('duplicate');
+      }
+    });
 
-  // Missing list with detailed variant information
+  // Update Shuttle headers using Shuttle missing map
+  document
+    .querySelectorAll('.schedule-table[aria-label="Shuttle"] .row.header .cell.head[data-date]')
+    .forEach(h => {
+      const dk = h.getAttribute('data-date');
+      if (!dk) return;
+      if (shuttle_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
+    });
+
+  // Update Breakfast Bar headers using Breakfast missing map
+  document
+    .querySelectorAll('.schedule-table[aria-label="Breakfast Bar"] .row.header .cell.head[data-date]')
+    .forEach(h => {
+      const dk = h.getAttribute('data-date');
+      if (!dk) return;
+      if (bb_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
+    });
+
+  // Missing list with detailed Front Desk variant information
   const list = document.getElementById('missing-list');
   if (list) {
-    const missingDates = Object.entries(missing).filter(([,v]) => v).map(([k]) => k);
+    const missingDates = Object.entries(missing || {}).filter(([, v]) => v).map(([k]) => k);
     if (missingDates.length === 0) {
       list.innerHTML = '';
     } else {
@@ -66,20 +98,17 @@ function updateCoverageUI(data) {
         const d = new Date(iso);
         return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
       };
-      
-      // Create detailed missing coverage message
+
       const missingDetails = missingDates.map(dateKey => {
         const dateStr = fmt(dateKey);
-        const variants = variant_counts[dateKey] || {};
+        const variants = (variant_counts && variant_counts[dateKey]) || {};
         const missingVariants = [];
-        
-        if (variants.AM < 2) missingVariants.push(`AM (${variants.AM}/2)`);
-        if (variants.PM < 2) missingVariants.push(`PM (${variants.PM}/2)`);
-        if (variants.Audit < 2) missingVariants.push(`Audit (${variants.Audit}/2)`);
-        
+        if ((variants.AM || 0) < 2) missingVariants.push(`AM (${variants.AM || 0}/2)`);
+        if ((variants.PM || 0) < 2) missingVariants.push(`PM (${variants.PM || 0}/2)`);
+        if ((variants.Audit || 0) < 2) missingVariants.push(`Audit (${variants.Audit || 0}/2)`);
         return `${dateStr}: ${missingVariants.join(', ')}`;
       });
-      
+
       list.innerHTML = `Missing coverage: ${missingDetails.join('; ')}`;
     }
   }
