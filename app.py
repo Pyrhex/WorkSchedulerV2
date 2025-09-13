@@ -1294,31 +1294,33 @@ def assign():
         a = s.scalar(select(Assignment).where(Assignment.week_id == week.id, Assignment.employee_id == emp.id, Assignment.date == dte))
         if not a:
             return jsonify({"ok": False, "error": "Assignment not found"}), 404
-        # Block assignment if approved time off; force TIME OFF
+        # If there is approved time off on this date, allow manual override:
+        # - When user selects a non-time-off value, record it and mark dismissed_timeoff=1
+        #   to indicate a scheduled override despite approved time off.
+        # - When user selects TIME OFF explicitly, set it and clear dismissed flag.
         if has_approved_timeoff(emp.name, dte, s):
-            if a.value != TIME_OFF_LABEL:
+            if value and value != TIME_OFF_LABEL:
+                # Allow override with explicit shift
+                a.value = value
+                try:
+                    # Best-effort; column may not exist in older DBs
+                    a.dismissed_timeoff = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            else:
+                # Explicit TIME OFF selection
                 a.value = TIME_OFF_LABEL
-                s.commit()
-            counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
-            return jsonify({
-                "ok": False,
-                "error": "Approved time off",
-                "code": "timeoff",
-                "value": TIME_OFF_LABEL,
-                "counts": counts,
-                "missing": missing,
-                "required": required,
-                "variant_counts": variant_counts,
-                "shuttle_missing": shuttle_missing,
-                "shuttle_required": shuttle_required,
-                "shuttle_counts": shuttle_counts,
-                "bb_missing": bb_missing,
-                "bb_required": bb_required,
-                "bb_counts": bb_counts,
-                "fd_duplicates": fd_duplicates,
-                "double_booked": double_booked_snapshot(week.id),
-            }), 409
-        a.value = value
+                try:
+                    a.dismissed_timeoff = False  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        else:
+            # Normal assignment path; also clear dismissed flag if set previously
+            a.value = value
+            try:
+                a.dismissed_timeoff = False  # type: ignore[attr-defined]
+            except Exception:
+                pass
         s.commit()
 
     counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
@@ -2245,37 +2247,69 @@ def export_schedule_excel(week_id: int):
         
         # Create mapping of employee names to their row numbers
         employee_rows = {}
+        import re as _re_names
+
+        def _primary_name_from_cell(raw: str) -> Optional[str]:
+            """Extract the primary employee name from a template name cell.
+            Handles cases like "Sara and TBD", "Sara/TBD", "Sara & TBD" by
+            returning just "SARA" and ignoring placeholders like "TBD" or "-".
+            Returns uppercase name or None if it's a placeholder.
+            """
+            if not raw or not isinstance(raw, str):
+                return None
+            s = (raw or "").replace("*", "").strip().upper()
+            if not s or s in {"-", "TBD"}:
+                return None
+            # Split on common connectors and pick the first non-placeholder token
+            parts = _re_names.split(r"\s*(?:AND|/|&|\+)\s*", s)
+            for p in parts:
+                token = p.strip()
+                if token and token not in {"-", "TBD"}:
+                    return token
+            return None
         
         # Front Desk employees (rows 5-22)
         for row in range(5, 23):
             name_cell = ws[f'D{row}']
-            if name_cell.value and isinstance(name_cell.value, str):
-                name = name_cell.value.strip().upper()
-                if name and name != "-" and name != "TBD":
-                    # Remove asterisk if present
-                    clean_name = name.replace("*", "").strip()
-                    employee_rows[clean_name] = {"row": row, "section": "Front Desk"}
+            primary = _primary_name_from_cell(name_cell.value)
+            if primary:
+                employee_rows[primary] = {"row": row, "section": "Front Desk"}
         
         # Shuttle employees (rows 24-35)
         for row in range(24, 36):
             name_cell = ws[f'D{row}']
-            if name_cell.value and isinstance(name_cell.value, str):
-                name = name_cell.value.strip().upper()
-                if name and name != "-" and name != "TBD":
-                    # Remove asterisk if present
-                    clean_name = name.replace("*", "").strip()
-                    employee_rows[clean_name] = {"row": row, "section": "Shuttle"}
+            primary = _primary_name_from_cell(name_cell.value)
+            if primary:
+                employee_rows[primary] = {"row": row, "section": "Shuttle"}
         
         # Breakfast Bar employees (rows 37-42)
         for row in range(37, 43):
             name_cell = ws[f'D{row}']
-            if name_cell.value and isinstance(name_cell.value, str):
-                name = name_cell.value.strip().upper()
-                if name and name != "-" and name != "TBD":
-                    # Remove asterisk if present
-                    clean_name = name.replace("*", "").strip()
-                    employee_rows[clean_name] = {"row": row, "section": "Breakfast Bar"}
+            primary = _primary_name_from_cell(name_cell.value)
+            if primary:
+                employee_rows[primary] = {"row": row, "section": "Breakfast Bar"}
         
+        # Build map of employee -> primary section name (for cross-role tagging)
+        emp_primary: dict[str, str] = {}
+        for e in s.scalars(select(Employee)):
+            sec = s.get(Section, e.section_id)
+            if sec:
+                emp_primary[e.name.upper()] = sec.name
+
+        # Helpers to classify a raw assignment label into a section
+        def shift_section_of(value: Optional[str]) -> Optional[str]:
+            if not value or value in ("Set", TIME_OFF_LABEL):
+                return None
+            if value in FRONT_DESK_SHIFTS:
+                return "Front Desk"
+            if value in BREAKFAST_SHIFTS:
+                return "Breakfast Bar"
+            if value in SHUTTLE_SHIFTS:
+                return "Shuttle"
+            return None
+
+        role_abbrev = {"Front Desk": "FD", "Breakfast Bar": "BB", "Shuttle": "SH"}
+
         # Fill in the shift data
         import re
         def _normalize_shift_display(raw: str) -> str:
@@ -2329,13 +2363,23 @@ def export_schedule_excel(week_id: int):
                         # Format shift display: time-only and normalized dash spacing
                         shift_display = _normalize_shift_display(shift_value)
                         # Front Desk export requirement: remove :00 and use hyphen
-                        if section_name == "Front Desk":
+                        # Apply FD time formatting if the shift itself is a Front Desk shift,
+                        # regardless of which section row we're writing into.
+                        if shift_section_of(shift_value) == "Front Desk":
                             # collapse ":00am/pm" -> "am/pm"
                             shift_display = re.sub(r":00(?=(am|pm))", "", shift_display)
                             # use hyphen instead of en dash
                             shift_display = shift_display.replace("–", "-")
                             # normalize spacing around hyphen
                             shift_display = re.sub(r"\s*-\s*", " - ", shift_display)
+
+                        # If the shift belongs to a different section than the employee's primary,
+                        # append a role tag like "(FD)" at the end.
+                        emp_primary_role = emp_primary.get(employee_key)
+                        shift_role = shift_section_of(shift_value)
+                        if emp_primary_role and shift_role and shift_role != emp_primary_role:
+                            tag = role_abbrev.get(shift_role, shift_role)
+                            shift_display = f"{shift_display} ({tag})"
 
                         # Set the cell value
                         ws[f'{col_letter}{row_num}'] = shift_display
