@@ -2243,4 +2243,4 @@ def export_schedule_excel(week_id: int):
 
 if __name__ == "__main__":
     init_db_once()
-    app.run(host="0.0.0.0", port=5008, debug=True)
+    app.run(host="0.0.0.0", port=5003, debug=True)
