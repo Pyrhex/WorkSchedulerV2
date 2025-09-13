@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="content-inner">
+    <section class="schedule-header">
+      <div class="title">Schedules</div>
+      <div class="actions">
+        <a class="btn primary" href="/generate" onclick="return confirmGenerateSchedule()">Generate Current Week</a>
+      </div>
+    </section>
+
+    {% set list = periods or weeks %}
+    <div class="table-card" style="max-width: 760px;">
+      <div class="table-title">4‑Week Periods <span style="color:#64748b; font-weight:500;">({{ (list or [])|length }})</span></div>
+      <div style="padding: 8px 0;">
+        {% if (list or [])|length == 0 %}
+          <div style="padding: 12px 16px; color:#64748b;">No schedules yet. Generate the current week to create your first period.</div>
+        {% else %}
+          <div style="display:grid; gap:8px; padding: 8px 12px;">
+            {% for w in list %}
+              <a href="/week/{{ w.id }}" style="
+                display:grid; grid-template-columns: 1fr auto; align-items:center;
+                padding:12px 14px; border:1px solid #e2e8f0; border-radius:8px; text-decoration:none; color:inherit;
+              " onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+                <div style="font-weight:600;">
+                  {{ w.start }} – {{ w.end }}
+                </div>
+                <div style="color:#64748b; font-weight:700;">›</div>
+              </a>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% endblock %}

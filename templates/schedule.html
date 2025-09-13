@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+
+{% block content %}
+<script>
+  window.scheduleGenerated = {{ meta.schedule_generated|tojson }};
+  window.currentWeekId = {{ meta.week_id|tojson }};
+</script>
+  <div class="content-inner">
+    <div class="banner success">{{ meta.success_banner }}</div>
+
+    <section class="schedule-header">
+      <div class="title">Schedule: {{ meta.range_label }}</div>
+      <div class="actions">
+        <form action="{% if meta.week_id %}/export/excel/{{ meta.week_id }}{% else %}/export/excel/1{% endif %}" method="get" target="_blank" style="display:inline-block;">
+          <button class="btn secondary" type="submit">Export to Excel</button>
+        </form>
+        <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/manager-meals{% else %}/week/1/manager-meals{% endif %}" method="get" style="display:inline-block;">
+          <button class="btn purple" type="submit">Manager Meal List</button>
+        </form>
+        <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/generate{% else %}/generate{% endif %}" method="post" id="generate-form">
+          <button class="btn primary" type="submit">Generate New Schedule</button>
+        </form>
+        <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/delete{% else %}/delete{% endif %}" method="post" onsubmit="return confirm('Delete this schedule?');">
+          <button class="btn danger" type="submit">Delete This Schedule</button>
+        </form>
+      </div>
+      <div class="subtitle">{{ meta.fd_note }}</div>
+    </section>
+
+    <section class="week-nav">
+      <button class="btn ghost" id="prev-week" aria-label="Previous Week">&lt; Previous</button>
+      <div class="week-label">{{ meta.week_label }}</div>
+      <button class="btn ghost" id="next-week" aria-label="Next Week">Next &gt;</button>
+    </section>
+
+    
+
+    <section class="tables">
+      <div class="table-card">
+        <div class="table-title">Breakfast Bar</div>
+        <div class="schedule-table" role="table" aria-label="Breakfast Bar">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Employees</div>
+            {% for d in week.dates %}
+              <div class="cell head {% if bb_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          {% for emp in breakfast.employees %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ emp }}</div>
+              {% for d in week.dates %}
+                {% set val = breakfast.assignments[emp][d.key] %}
+                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
+                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
+                {% set sel_cls =
+                  'select-green' if val == '5AM–12PM' else (
+                  'select-blue' if val == '6AM–12PM' else (
+                  'select-purple' if val == '7AM–12PM' else (
+                  'select-yellow' if val == 'TIME OFF' else (
+                  'select-gray' if val == 'Set' else ''))))
+                %}
+                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                    {% for opt in breakfast.shifts %}
+                      {% if opt == 'TIME OFF' %}
+                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                      {% else %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
+                      {% endif %}
+                    {% endfor %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="table-card">
+        <div class="table-title">Front Desk</div>
+        <div class="schedule-table" role="table" aria-label="Front Desk">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Employees</div>
+            {% for d in week.dates %}
+              <div class="cell head {% if missing[d.key] %}missing{% endif %}" role="columnheader" data-date="{{ d.key }}" title="{{ d.label_long }}">
+                <div class="head-date">{{ d.label_short }}</div>
+              </div>
+            {% endfor %}
+          </div>
+          {% for emp in front_desk.employees %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ emp }}</div>
+              {% for d in week.dates %}
+                {% set val = front_desk.assignments[emp][d.key] %}
+                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
+                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
+                {% set sel_cls =
+                  'select-yellow' if val == 'TIME OFF' else (
+                  'select-red' if val.startswith('Audit') else (
+                  'select-green' if val.startswith('AM') else (
+                  'select-blue' if val.startswith('PM') else (
+                  'select-gray' if val == 'Set' else ''))))
+                %}
+                <div class="cell" role="cell" data-section="Front Desk" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                    {% for opt in front_desk.shifts %}
+                      {% if opt == 'TIME OFF' %}
+                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                      {% else %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
+                      {% endif %}
+                    {% endfor %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="coverage-notes">
+          <div class="missing-list" id="missing-list">
+            {% set miss_labels = [] %}
+            {% for d in week.dates %}
+              {% if missing[d.key] %}
+                {% set _ = miss_labels.append(d.label_short) %}
+              {% endif %}
+            {% endfor %}
+            {% if miss_labels %}
+              Missing coverage: {{ miss_labels | join(', ') }}
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      
+      <div class="table-card">
+        <div class="table-title">Shuttle</div>
+        <div class="schedule-table" role="table" aria-label="Shuttle">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Employees</div>
+            {% for d in week.dates %}
+              <div class="cell head {% if shuttle_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          {% for emp in shuttle.employees %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ emp }}</div>
+              {% for d in week.dates %}
+                {% set val = shuttle.assignments[emp][d.key] %}
+                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
+                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
+                {% set sel_cls =
+                  'select-yellow' if val == 'TIME OFF' else (
+                  'select-green' if val.startswith('AM') else (
+                  'select-blue' if val.startswith('Midday') else (
+                  'select-purple' if val.startswith('PM') else (
+                  'select-red' if val.startswith('Crew') else (
+                  'select-gray' if val == 'Set' else '')))))
+                %}
+                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                    {% for opt in shuttle.shifts %}
+                      {% if opt == 'TIME OFF' %}
+                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                      {% else %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
+                      {% endif %}
+                    {% endfor %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+  </div>
+{% endblock %}
+
+{% block sidebar %}
+  <div class="sidebar-inner">
+    <div class="sidebar-title">Time Off</div>
+    <div class="sidebar-subtitle">Toggle approval to save and update the schedule.</div>
+    <ul class="timeoff-list">
+      {% for item in time_off %}
+        <li class="timeoff-item" data-id="{{ item.id }}">
+          <div class="info">
+            <div class="name">{{ item.name }} <span class="role">({{ item.role }})</span></div>
+            <div class="dates">
+              {{ item.label }}
+              <span class="status {{ 'approved' if item.approved else 'pending' }}" data-status>{{ '✔️' if item.approved else 'pending' }}</span>
+            </div>
+          </div>
+          <div class="actions" style="display:flex; align-items:center; gap:8px;">
+            <label class="switch" title="Toggle Approved">
+              <input type="checkbox" class="timeoff-toggle" {% if item.approved %}checked{% endif %} />
+              <span class="slider"></span>
+            </label>
+            <span class="toggle-label" style="font-size:12px; color:#475569;">Approved</span>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endblock %}

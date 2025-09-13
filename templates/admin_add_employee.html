@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="content-inner">
+    <div class="table-card" style="max-width: 520px;">
+      <div class="table-title">Add Employee</div>
+      <div style="padding:16px;">
+        {% if error %}
+          <div class="banner success" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">{{ error }}</div>
+        {% endif %}
+        <form method="post" action="/admin/employees/add">
+          <div style="display:grid; gap:12px;">
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Name</div>
+              <input name="name" required placeholder="Full name" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+            </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Role</div>
+              <select name="role" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;">
+                <option value="Breakfast Bar">Breakfast Bar</option>
+                <option value="Front Desk">Front Desk</option>
+                <option value="Shuttle">Shuttle</option>
+              </select>
+            </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Preferred Shift (optional)</div>
+              <input name="preferred_shift" placeholder="e.g., AM (6:00AM–2:00PM)" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+            </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Seniority (optional)</div>
+              <input type="number" min="0" step="1" name="seniority" placeholder="e.g., 5" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+            </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Preferred Shifts / Week (optional)</div>
+              <input type="number" min="0" step="1" name="preferred_shifts_per_week" placeholder="e.g., 4" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+            </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Max Shifts / Week (optional)</div>
+              <input type="number" min="0" step="1" name="max_shifts_per_week" placeholder="e.g., 5" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+            </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Availability (optional)</div>
+              <input name="availability" placeholder="e.g., Mon-Fri 6a-2p; Sat Sun off" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+            </label>
+            <div style="display:flex; gap:8px;">
+              <button class="btn primary" type="submit">Add Employee</button>
+              <a class="btn ghost" href="/">Cancel</a>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="content-inner">
+    <div class="table-card" style="max-width: 560px;">
+      <div class="table-title">New Time Off Request</div>
+      <div style="padding: 16px;">
+        {% if error %}
+          <div class="banner success" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">{{ error }}</div>
+        {% endif %}
+        <form method="post" action="/timeoff/new">
+          <div style="display:grid; gap:12px;">
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Employee Name</div>
+              <input name="name" list="employee-list" required placeholder="Select or type name" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <datalist id="employee-list">
+                {% for e in employees %}
+                  <option value="{{ e.name }}">{{ e.name }}</option>
+                {% endfor %}
+              </datalist>
+            </label>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+              <label>
+                <div style="font-weight:600; margin-bottom:6px;">From</div>
+                <input type="date" name="from" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              </label>
+              <label>
+                <div style="font-weight:600; margin-bottom:6px;">To</div>
+                <input type="date" name="to" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              </label>
+            </div>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" name="approved" /> Approved
+            </label>
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" name="vacation" /> Vacation
+            </label>
+            <div style="display:flex; gap:8px;">
+              <button class="btn primary" type="submit">Create</button>
+              <a class="btn ghost" href="/timeoff">Cancel</a>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endblock %}

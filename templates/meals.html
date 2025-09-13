@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <style>
+    .meals-header { margin-bottom: 24px; }
+  </style>
+  <div class="content-inner">
+    <section class="schedule-header meals-header">
+      <div class="title">Manager Meal List</div>
+    </section>
+
+    {% if rows %}
+    <section class="tables">
+      <div class="table-card">
+        <div class="table-title" style="display:flex; align-items:center; justify-content:space-between;">
+          <span>This Week</span>
+          <button class="btn primary" onclick="copyMeals()">Copy</button>
+        </div>
+        <div style="padding: 12px 16px;">
+          <table style="width:100%; border-collapse: collapse;">
+            <thead>
+              <tr>
+                <th style="text-align:left; color: var(--muted); padding: 8px 6px; border-bottom: 1px solid var(--grid); width: 160px;">Date</th>
+                <th style="text-align:left; color: var(--muted); padding: 8px 6px; border-bottom: 1px solid var(--grid);">Managers (Night, AM, PM)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for date_str, names in rows %}
+              <tr>
+                <td style="padding: 8px 6px; border-bottom: 1px solid var(--grid); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">{{ date_str }}</td>
+                <td style="padding: 8px 6px; border-bottom: 1px solid var(--grid);">{{ names }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <div style="margin-top: 10px; color: var(--muted); font-size: 13px;">{{ rows|length }} day(s) listed.</div>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block sidebar %}{% endblock %}
+
+<script>
+  const MEAL_TEXT = `{% for date_str, names in rows %}{{ date_str }}: {{ names }}{% if not loop.last %}\n{% endif %}{% endfor %}`;
+  async function copyMeals() {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(MEAL_TEXT);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = MEAL_TEXT; ta.style.position='fixed'; ta.style.opacity='0';
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+      }
+    } catch (_) {}
+  }
+</script>

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="content-inner">
+    <section class="schedule-header">
+      <div class="title">Manager Meal List</div>
+      <div class="subtitle">Front Desk — Week: {{ week_label }}</div>
+    </section>
+
+    <section class="tables">
+      <div class="table-card">
+        <div class="table-title">Per Day</div>
+        <div class="schedule-table" role="table" aria-label="Manager Meals">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Day</div>
+            <div class="cell head" role="columnheader">AM</div>
+            <div class="cell head" role="columnheader">PM</div>
+            <div class="cell head" role="columnheader">Audit</div>
+          </div>
+          {% for d in days %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ d.label }}</div>
+              <div class="cell" role="cell">{{ d.AM or '-' }}</div>
+              <div class="cell" role="cell">{{ d.PM or '-' }}</div>
+              <div class="cell" role="cell">{{ d.Audit or '-' }}</div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+  </div>
+{% endblock %}
+

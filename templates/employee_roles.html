@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="content-inner">
+    <section class="schedule-header">
+      <div class="title">Secondary Roles — {{ employee.name }}</div>
+      <div class="actions">
+        <a class="btn ghost" href="/admin/employees">Back to Employees</a>
+      </div>
+      <div class="subtitle">Primary role is fixed to: <strong>{{ sections | selectattr('id','equalto',primary_id) | map(attribute='name') | list | first }}</strong></div>
+    </section>
+
+    <form method="post" action="/admin/employees/{{ employee.id }}/roles">
+      <div class="table-card">
+        <div class="table-title">Select Additional Roles</div>
+        <div style="padding: 12px 16px;">
+          {% for s in sections %}
+            {% if s.id != primary_id %}
+              <label style="display:flex; align-items:center; gap:8px; margin:6px 0;">
+                <input type="checkbox" name="secondary_roles" value="{{ s.id }}" {% if s.id in selected_ids %}checked{% endif %} />
+                <span>{{ s.name }}</span>
+              </label>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      <div style="margin-top:12px; display:flex; gap:8px;">
+        <button class="btn primary" type="submit">Save</button>
+        <a class="btn ghost" href="/admin/employees">Cancel</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+

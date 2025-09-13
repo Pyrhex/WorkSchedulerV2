@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="content-inner">
+    <section class="schedule-header">
+      <div class="title">Employees</div>
+      <div class="actions">
+        <a class="btn primary" href="/admin/employees/add">Add Employee</a>
+      </div>
+    </section>
+
+    <div class="tables">
+      {% for sec_name, people in employees.items() %}
+        <div class="table-card">
+          <div class="table-title">{{ sec_name }}</div>
+          <div style="padding: 12px 16px;">
+            {% if people|length == 0 %}
+              <div style="color:#64748b;">No employees yet.</div>
+            {% else %}
+              <div style="overflow-x:auto;">
+                <table style="width:100%; border-collapse: collapse;">
+                  <thead>
+                    <tr style="text-align:left; border-bottom:1px solid #e2e8f0;">
+                      <th style="padding:8px;">Name</th>
+                      <th style="padding:8px;">Role</th>
+                      <th style="padding:8px;">Secondary Roles</th>
+                      <th style="padding:8px; width: 320px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for p in people %}
+                      <tr style="border-top:1px solid #f1f5f9;">
+                        <td style="padding:8px;">{{ p.name }}</td>
+                        <td style="padding:8px;">
+                          <form method="post" action="/admin/employees/{{ p.id }}/role" style="display:flex; gap:8px; align-items:center;">
+                            <select name="role" class="shift-select" style="max-width:200px;">
+                              {% for r in roles %}
+                                <option value="{{ r.name }}" {% if r.id == p.section_id %}selected{% endif %}>{{ r.name }}</option>
+                              {% endfor %}
+                            </select>
+                            <button class="btn" type="submit">Update</button>
+                          </form>
+                        </td>
+                        <td style="padding:8px; color:#475569;">
+                          <form method="get" action="/admin/employees/{{ p.id }}/roles" style="display:inline-block;">
+                            <button class="btn" type="submit">Manage</button>
+                          </form>
+                        </td>
+                        <td style="padding:8px;">
+                          <form method="get" action="/admin/employees/{{ p.id }}/availability" style="display:inline-block;">
+                            <button class="btn" type="submit">Availability</button>
+                          </form>
+                          <form method="post" action="/admin/employees/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}?');" style="display:inline-block; margin-left:8px;">
+                            <button class="btn danger" type="submit">Delete</button>
+                          </form>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% endblock %}
