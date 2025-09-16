@@ -10,13 +10,22 @@
       </div>
     </section>
 
-    <div style="margin-bottom:8px; display:flex; gap:8px; flex-wrap:wrap;">
-      {% if allowed_roles %}
-        {% for rn in allowed_roles %}
-          <a class="btn {% if rn == role %}secondary{% else %}ghost{% endif %}" href="{{ url_for('employee_availability', eid=employee.id, role=rn) }}">{{ rn }}</a>
-        {% endfor %}
-      {% endif %}
-    </div>
+    {% if allowed_roles %}
+      <div class="role-tabs" aria-label="Roles for {{ employee.name }}">
+        <div class="role-tabs-hint">Select a role tab to edit availability.</div>
+        <div class="role-tabs-list" role="tablist">
+          {% for rn in allowed_roles %}
+            <a
+              class="role-tab {% if rn == role %}active{% endif %}"
+              role="tab"
+              aria-selected="{% if rn == role %}true{% else %}false{% endif %}"
+              {% if rn == role %}aria-current="page"{% endif %}
+              href="{{ url_for('employee_availability', eid=employee.id, role=rn) }}"
+            >{{ rn }}</a>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
 
     <form method="post" action="{{ url_for('employee_availability', eid=employee.id, role=role) }}">
       <div class="table-card">

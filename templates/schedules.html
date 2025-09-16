@@ -2,6 +2,23 @@
 
 {% block content %}
   <div class="content-inner">
+    {% if undo_status == 'restored' %}
+      <div class="banner success">Schedule period{% if undo_label %} {{ undo_label }}{% endif %} restored.</div>
+    {% elif undo_status == 'expired' %}
+      <div class="banner danger">Undo expired. The deleted period was not restored.</div>
+    {% elif undo_context %}
+      <div class="banner info" data-undo-deadline="{{ undo_context.expires }}">
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <span>
+            Deleted period{% if undo_context.label %} {{ undo_context.label }}{% endif %}. 
+            <span data-undo-seconds>{{ undo_context.seconds }}</span>s to undo.
+          </span>
+          <form action="/undo-delete/{{ undo_context.token }}" method="post" style="display:inline-block;">
+            <button class="btn secondary" type="submit">Undo</button>
+          </form>
+        </div>
+      </div>
+    {% endif %}
     <section class="schedule-header">
       <div class="title">Schedules</div>
       <div class="actions">

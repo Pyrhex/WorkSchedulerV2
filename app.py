@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import io
+import re
+import time
+import uuid
 from datetime import date, timedelta
 from random import choice, sample
-from typing import Dict, List, Optional
-import io
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for, send_file, Response
 from flask import stream_with_context
-import re
 from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from openpyxl import Workbook, load_workbook
@@ -52,6 +54,7 @@ class Employee(Base):
     seniority: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     preferred_shifts_per_week: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_shifts_per_week: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sort_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class EmployeeRole(Base):
@@ -125,7 +128,46 @@ def format_week_label(start: date) -> str:
     return f"{start.strftime('%a %b %d, %Y')} – {end.strftime('%a %b %d, %Y')}"
 
 
+FOUR_WEEK_BASELINE = date(2025, 9, 18)
+
+
+def four_week_period_bounds(week_start: date) -> Tuple[date, date]:
+    """Return the 4-week period (start, end) anchored to the baseline week."""
+    if not week_start:
+        return FOUR_WEEK_BASELINE, FOUR_WEEK_BASELINE + timedelta(days=27)
+    delta_days = (week_start - FOUR_WEEK_BASELINE).days
+    if delta_days >= 0:
+        idx = delta_days // 28
+    else:
+        idx = -((-delta_days - 1) // 28) - 1
+    period_start = FOUR_WEEK_BASELINE + timedelta(days=idx * 28)
+    return period_start, period_start + timedelta(days=27)
+
+
+def format_four_week_label(start: date, end: date) -> str:
+    """Pretty label for 4-week period headers."""
+    start_month = start.strftime("%B")
+    end_month = end.strftime("%B")
+    if start.year == end.year:
+        if start.month == end.month:
+            return f"{start_month} {start.day} – {end.day}, {start.year}"
+        return f"{start_month} {start.day} – {end_month} {end.day}, {start.year}"
+    return f"{start_month} {start.day}, {start.year} – {end_month} {end.day}, {end.year}"
+
+
 TIME_OFF_LABEL = "TIME OFF"
+
+
+UNDO_DELETE_SECONDS = 20
+_pending_period_undos: Dict[str, dict] = {}
+
+
+def _prune_expired_period_undos() -> None:
+    """Drop any undo tokens that have passed their lifetime."""
+    now = time.time()
+    expired = [tok for tok, data in _pending_period_undos.items() if data.get("expires", 0) <= now]
+    for tok in expired:
+        _pending_period_undos.pop(tok, None)
 
 # Seniority order for Front Desk manager-on-duty selection
 SENIORITY_ORDER = [
@@ -170,6 +212,34 @@ MAINTENANCE_SHIFTS = [
 ]
 
 
+def next_sort_order_for_section(session: Session, section_id: int) -> int:
+    max_order = session.scalar(select(func.max(Employee.sort_order)).where(Employee.section_id == section_id))
+    return (max_order or -1) + 1
+
+
+def ensure_employee_sort_orders(session: Session, section_ids: Optional[Iterable[int]] = None) -> None:
+    """Assign sequential sort orders for the provided sections."""
+    if section_ids is None:
+        query = select(Section)
+    else:
+        ids = list(section_ids)
+        if not ids:
+            return
+        query = select(Section).where(Section.id.in_(ids))
+    sections = session.scalars(query).all()
+    for sec in sections:
+        employees = list(
+            session.scalars(
+                select(Employee)
+                .where(Employee.section_id == sec.id)
+                .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.id)
+            )
+        )
+        for idx, emp in enumerate(employees):
+            if emp.sort_order is None or emp.sort_order != idx:
+                emp.sort_order = idx
+
+
 def init_db_once():
     Base.metadata.create_all(engine)
     with SessionLocal() as s:
@@ -189,6 +259,8 @@ def init_db_once():
                 conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN preferred_shifts_per_week INTEGER")
             if "max_shifts_per_week" not in cols:
                 conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN max_shifts_per_week INTEGER")
+            if "sort_order" not in cols:
+                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN sort_order INTEGER")
             # Create employee_roles table if missing
             conn.exec_driver_sql(
                 """
@@ -265,6 +337,8 @@ def init_db_once():
                 exists = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == emp.id, Assignment.date == d))
                 if not exists:
                     s.add(Assignment(week_id=wk.id, employee_id=emp.id, date=d, value="Set"))
+
+        ensure_employee_sort_orders(s)
 
         s.commit()
 
@@ -557,6 +631,7 @@ def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
 def build_week_context(week_id: int):
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
+        period_start, period_end = four_week_period_bounds(wk.start_date)
         dates = week_dates(wk.start_date)
         week_keys = {d["key"] for d in dates}
         # Sections and employees
@@ -566,15 +641,24 @@ def build_week_context(week_id: int):
             sec_obj = s.scalar(select(Section).where(Section.name == sec_name))
             if not sec_obj:
                 continue
-            # Preserve the same ordering as Employees tab: DB insertion (id asc) for primaries
             primary_emps = list(
                 s.scalars(
-                    select(Employee).where(Employee.section_id == sec_obj.id).order_by(Employee.id.asc())
+                    select(Employee)
+                    .where(Employee.section_id == sec_obj.id)
+                    .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
                 )
             )
             secondary_ids = [row[0] for row in s.execute(select(EmployeeRole.employee_id).where(EmployeeRole.section_id == sec_obj.id)).all()]
             secondary_emps = (
-                list(s.scalars(select(Employee).where(Employee.id.in_(secondary_ids)).order_by(Employee.id.asc()))) if secondary_ids else []
+                list(
+                    s.scalars(
+                        select(Employee)
+                        .where(Employee.id.in_(secondary_ids))
+                        .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
+                    )
+                )
+                if secondary_ids
+                else []
             )
             primary_ids = {e.id for e in primary_emps}
             # Append secondary employees after primaries, keep their insertion order, and avoid duplicates
@@ -664,8 +748,13 @@ def build_week_context(week_id: int):
         schedule_generated = has_generated_schedule(week_id)
         
         meta = {
-            "range_label": "September 18 – October 15, 2025",
-            "success_banner": "4-week schedule saved from September 18, 2025 to October 15, 2025!",
+            "range_label": format_four_week_label(period_start, period_end),
+            "success_banner": (
+                "4-week schedule saved from "
+                f"{period_start.strftime('%B')} {period_start.day}, {period_start.year} "
+                "to "
+                f"{period_end.strftime('%B')} {period_end.day}, {period_end.year}!"
+            ),
             "week_label": f"{format_week_label(wk.start_date)}",
             "fd_note": "Front Desk: 2 agents per AM/PM/Audit (6 total/day)",
             "schedule_generated": schedule_generated,
@@ -992,6 +1081,7 @@ def admin_add_employee():
         preferred_shifts_per_week = int(pref_count_raw) if pref_count_raw.isdigit() else None
         max_shifts_per_week = int(max_count_raw) if max_count_raw.isdigit() else None
         availability = (request.form.get("availability") or "").strip() or None
+        sort_order = next_sort_order_for_section(s, sec.id)
         emp = Employee(
             name=name,
             section_id=sec.id,
@@ -1000,6 +1090,7 @@ def admin_add_employee():
             preferred_shifts_per_week=preferred_shifts_per_week,
             max_shifts_per_week=max_shifts_per_week,
             availability=availability,
+            sort_order=sort_order,
         )
         s.add(emp)
         s.flush()
@@ -1016,15 +1107,73 @@ def list_employees():
     with SessionLocal() as s:
         employees = {}
         sections = list(s.scalars(select(Section)))
+        secondary_role_sets: dict[int, set[int]] = {}
+        for eid, sid in s.execute(select(EmployeeRole.employee_id, EmployeeRole.section_id)):
+            secondary_role_sets.setdefault(eid, set()).add(sid)
+        secondary_role_map = {
+            eid: sorted(list(sids))[0]
+            for eid, sids in secondary_role_sets.items()
+            if sids
+        }
+        role_options = [{"id": sec.id, "name": sec.name} for sec in sections]
         for sec in sections:
-            employees[sec.name] = list(s.scalars(select(Employee).where(Employee.section_id == sec.id)))
+            employees[sec.name] = list(
+                s.scalars(
+                    select(Employee)
+                    .where(Employee.section_id == sec.id)
+                    .order_by(Employee.sort_order, Employee.name)
+                )
+            )
+        section_ids = {sec.name: sec.id for sec in sections}
     shift_options = {
         "Breakfast Bar": [o for o in BREAKFAST_SHIFTS],
         "Front Desk": [o for o in FRONT_DESK_SHIFTS],
         "Shuttle": [o for o in SHUTTLE_SHIFTS],
         "Maintenance": [o for o in MAINTENANCE_SHIFTS],
     }
-    return render_template("employees.html", employees=employees, roles=sections, shift_options=shift_options)
+    return render_template(
+        "employees.html",
+        employees=employees,
+        roles=sections,
+        section_ids=section_ids,
+        secondary_roles=secondary_role_map,
+        role_options=role_options,
+        shift_options=shift_options,
+    )
+
+
+@app.route("/admin/employees/reorder", methods=["POST"])
+def reorder_employees():
+    payload = request.get_json(silent=True) or {}
+    section_id_raw = payload.get("section_id")
+    employee_ids_raw = payload.get("employee_ids")
+    try:
+        section_id = int(section_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid section"}), 400
+    if not isinstance(employee_ids_raw, list):
+        return jsonify({"ok": False, "error": "Invalid employees"}), 400
+    try:
+        employee_ids = [int(eid) for eid in employee_ids_raw]
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid employees"}), 400
+    with SessionLocal() as s:
+        section = s.get(Section, section_id)
+        if not section:
+            return jsonify({"ok": False, "error": "Section not found"}), 404
+        db_ids = set(
+            s.scalars(select(Employee.id).where(Employee.section_id == section_id))
+        )
+        if len(employee_ids) != len(db_ids) or set(employee_ids) != db_ids:
+            return jsonify({"ok": False, "error": "Employees mismatch"}), 400
+        for sort_index, eid in enumerate(employee_ids):
+            emp = s.get(Employee, eid)
+            if not emp or emp.section_id != section_id:
+                continue
+            emp.sort_order = sort_index
+        ensure_employee_sort_orders(s, [section_id])
+        s.commit()
+    return jsonify({"ok": True})
 
 
 def employee_roles_for(s: Session, eid: int) -> list[Section]:
@@ -1043,16 +1192,36 @@ def manage_employee_roles(eid: int):
         current_secondary = {er.section_id for er in s.scalars(select(EmployeeRole).where(EmployeeRole.employee_id == eid))}
 
         if request.method == "POST":
-            # Parse selected secondary roles
-            selected = set(int(x) for x in request.form.getlist("secondary_roles"))
-            # Remove primary if accidentally included
-            if primary_section_id in selected:
-                selected.discard(primary_section_id)
-            # Replace all rows to avoid complex diffing errors
+            if request.is_json:
+                payload = request.get_json(silent=True) or {}
+                raw_id = payload.get("secondary_role")
+                try:
+                    selected_id = int(raw_id)
+                except (TypeError, ValueError):
+                    if raw_id in (None, "", "none"):
+                        selected_id = None
+                    else:
+                        return jsonify({"ok": False, "error": "Invalid role"}), 400
+            else:
+                raw_id = request.form.get("secondary_role")
+                try:
+                    selected_id = int(raw_id) if raw_id else None
+                except (TypeError, ValueError):
+                    selected_id = None
+            if selected_id == primary_section_id:
+                selected_id = None
             s.execute(delete(EmployeeRole).where(EmployeeRole.employee_id == eid))
-            for sid in selected:
-                s.add(EmployeeRole(employee_id=eid, section_id=sid))
+            if selected_id:
+                sec_exists = s.get(Section, selected_id)
+                if not sec_exists:
+                    if request.is_json:
+                        return jsonify({"ok": False, "error": "Role not found"}), 404
+                    selected_id = None
+                else:
+                    s.add(EmployeeRole(employee_id=eid, section_id=selected_id))
             s.commit()
+            if request.is_json:
+                return jsonify({"ok": True, "secondary_role": selected_id})
             return redirect(url_for('list_employees'))
 
         return render_template(
@@ -1066,18 +1235,39 @@ def manage_employee_roles(eid: int):
 
 @app.route("/admin/employees/<int:eid>/role", methods=["POST"])
 def change_employee_role(eid: int):
-    role = (request.form.get("role") or "").strip()
-    if not role:
-        return redirect(url_for('list_employees'))
+    payload = request.get_json(silent=True)
+    is_json = payload is not None
+    if is_json:
+        section_id_raw = payload.get("section_id")
+        try:
+            section_id = int(section_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Invalid role"}), 400
+        role_name = None
+    else:
+        role_name = (request.form.get("role") or "").strip()
+        if not role_name:
+            return redirect(url_for('list_employees'))
+        section_id = None
     with SessionLocal() as s:
         emp = s.get(Employee, eid)
         if not emp:
+            if is_json:
+                return jsonify({"ok": False, "error": "Employee not found"}), 404
             return redirect(url_for('list_employees'))
-        sec = s.scalar(select(Section).where(Section.name == role))
+        if section_id is not None:
+            sec = s.get(Section, section_id)
+        else:
+            sec = s.scalar(select(Section).where(Section.name == role_name))
         if not sec:
+            if is_json:
+                return jsonify({"ok": False, "error": "Role not found"}), 404
             return redirect(url_for('list_employees'))
         # Update role
+        previous_section_id = emp.section_id
         emp.section_id = sec.id
+        emp.sort_order = next_sort_order_for_section(s, sec.id)
+        ensure_employee_sort_orders(s, [previous_section_id, sec.id])
         # Reset current week assignments to Set to avoid shift-type mismatch
         week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
         for d in daterange(week.start_date, 7):
@@ -1087,6 +1277,8 @@ def change_employee_role(eid: int):
         s.commit()
         # Re-apply time off
         sync_timeoff_to_assignments(week.id, s)
+    if is_json:
+        return jsonify({"ok": True, "section_id": sec.id})
     return redirect(url_for('list_employees'))
 
 
@@ -1105,7 +1297,10 @@ def update_employee(eid: int):
         if role:
             sec = s.scalar(select(Section).where(Section.name == role))
             if sec and sec.id != emp.section_id:
+                previous_section_id = emp.section_id
                 emp.section_id = sec.id
+                emp.sort_order = next_sort_order_for_section(s, sec.id)
+                ensure_employee_sort_orders(s, [previous_section_id, sec.id])
                 # Reset current week assignments to Set due to role change
                 week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
                 for d in daterange(week.start_date, 7):
@@ -1127,6 +1322,7 @@ def delete_employee(eid: int):
         emp = s.get(Employee, eid)
         if not emp:
             return redirect(url_for('list_employees'))
+        section_id = emp.section_id
         # Delete assignments for this employee
         s.query(Assignment).filter(Assignment.employee_id == emp.id).delete()
         # Delete availability
@@ -1135,6 +1331,7 @@ def delete_employee(eid: int):
         s.query(TimeOff).filter(TimeOff.name == emp.name).delete()
         # Delete employee
         s.delete(emp)
+        ensure_employee_sort_orders(s, [section_id])
         s.commit()
     return redirect(url_for('list_employees'))
 
@@ -1338,25 +1535,21 @@ def timeoff_new():
 def schedules_page():
     with SessionLocal() as s:
         # Group weeks into 4-week periods anchored to the baseline Thursday
-        baseline = date(2025, 9, 18)
-        periods: dict[int, dict] = {}
+        periods: dict[date, dict] = {}
         for w in s.scalars(select(Week)):
-            # Compute 4-week period index relative to baseline (28 days)
-            delta_days = (w.start_date - baseline).days
-            idx = delta_days // 28 if delta_days >= 0 else -((-delta_days - 1) // 28) - 1
-            if idx not in periods:
-                period_start = baseline + timedelta(days=idx * 28)
-                period_end = period_start + timedelta(days=27)
-                periods[idx] = {
+            period_start, period_end = four_week_period_bounds(w.start_date)
+            info = periods.setdefault(
+                period_start,
+                {
                     "first_week_id": w.id,
                     "start": period_start,
                     "end": period_end,
-                }
-            else:
-                # Ensure first_week_id points to the earliest week in the period
-                existing_week = s.get(Week, periods[idx]["first_week_id"]) if periods[idx].get("first_week_id") else None
-                if existing_week and w.start_date < existing_week.start_date:
-                    periods[idx]["first_week_id"] = w.id
+                },
+            )
+            # Ensure first_week_id points to the earliest week in the period
+            existing_week = s.get(Week, info["first_week_id"]) if info.get("first_week_id") else None
+            if existing_week and w.start_date < existing_week.start_date:
+                info["first_week_id"] = w.id
         # Build list sorted by start date descending (most recent first)
         items = []
         for p in sorted(periods.values(), key=lambda x: x["start"], reverse=True):
@@ -1365,7 +1558,31 @@ def schedules_page():
                 "start": p["start"].strftime('%b %d, %Y'),
                 "end": p["end"].strftime('%b %d, %Y'),
             })
-    return render_template("schedules.html", periods=items)
+    _prune_expired_period_undos()
+    undo_token = request.args.get("undo")
+    undo_status = request.args.get("undo_status")
+    undo_label = request.args.get("label")
+    undo_context = None
+    if undo_token:
+        payload = _pending_period_undos.get(undo_token)
+        if payload and payload.get("expires", 0) > time.time():
+            seconds_left = max(0, int(payload["expires"] - time.time()))
+            undo_context = {
+                "token": undo_token,
+                "label": payload.get("label"),
+                "seconds": seconds_left,
+                "expires": int(payload["expires"] * 1000),
+            }
+        else:
+            undo_status = "expired"
+            undo_label = None
+    return render_template(
+        "schedules.html",
+        periods=items,
+        undo_context=undo_context,
+        undo_status=undo_status,
+        undo_label=undo_label,
+    )
 
 @app.route("/assign", methods=["POST"])
 def assign():
@@ -1957,10 +2174,28 @@ def generate_4_week_schedule(start_week_id: int):
             sec = s.scalar(select(Section).where(Section.name == name))
             if not sec:
                 return []
-            primary_ids = list(s.scalars(select(Employee.id).where(Employee.section_id == sec.id)))
+            primary_emps = list(
+                s.scalars(
+                    select(Employee)
+                    .where(Employee.section_id == sec.id)
+                    .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
+                )
+            )
             secondary_ids = [row[0] for row in s.execute(select(EmployeeRole.employee_id).where(EmployeeRole.section_id == sec.id)).all()]
-            # Combine and dedupe
-            return list({*(primary_ids), *secondary_ids})
+            secondary_emps = (
+                list(
+                    s.scalars(
+                        select(Employee)
+                        .where(Employee.id.in_(secondary_ids))
+                        .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
+                    )
+                )
+                if secondary_ids
+                else []
+            )
+            seen = {e.id for e in primary_emps}
+            ordered = primary_emps + [e for e in secondary_emps if e.id not in seen]
+            return [e.id for e in ordered]
 
         fd_emp_ids = employees_for_section("Front Desk")
         bb_emp_ids = employees_for_section("Breakfast Bar")
@@ -2303,16 +2538,74 @@ def generate_week(week_id: int):
     return redirect(url_for("view_week", week_id=week_id))
 
 
+def _delete_period_with_undo(s: Session, week: Week) -> Optional[str]:
+    if not week:
+        return None
+
+    period_start, period_end = four_week_period_bounds(week.start_date)
+    period_weeks = list(
+        s.scalars(
+            select(Week).where(Week.start_date >= period_start, Week.start_date <= period_end).order_by(Week.start_date)
+        )
+    )
+    if not period_weeks:
+        return None
+
+    weeks_payload: List[dict] = []
+    for pw in period_weeks:
+        assignments_payload: List[dict] = []
+        for a in s.scalars(select(Assignment).where(Assignment.week_id == pw.id)):
+            assignment_info = {
+                "employee_id": a.employee_id,
+                "date": a.date.isoformat(),
+                "value": a.value,
+            }
+            if hasattr(Assignment, "dismissed_timeoff"):
+                assignment_info["dismissed"] = int(getattr(a, "dismissed_timeoff", 0) or 0)
+            assignments_payload.append(assignment_info)
+        weeks_payload.append({
+            "start_date": pw.start_date.isoformat(),
+            "assignments": assignments_payload,
+        })
+
+    _prune_expired_period_undos()
+    expires_at = time.time() + UNDO_DELETE_SECONDS
+    token = uuid.uuid4().hex
+    label = format_four_week_label(period_start, period_end)
+    _pending_period_undos[token] = {
+        "expires": expires_at,
+        "label": label,
+        "weeks": weeks_payload,
+    }
+
+    try:
+        for pw in period_weeks:
+            if pw.start_date == FOUR_WEEK_BASELINE:
+                values = {"value": "Set"}
+                if hasattr(Assignment, "dismissed_timeoff"):
+                    values["dismissed_timeoff"] = 0
+                s.execute(update(Assignment).where(Assignment.week_id == pw.id).values(**values))
+                continue
+            s.execute(delete(Assignment).where(Assignment.week_id == pw.id))
+            s.delete(pw)
+        s.commit()
+    except Exception:
+        _pending_period_undos.pop(token, None)
+        s.rollback()
+        raise
+
+    return token
+
+
 @app.route("/delete", methods=["POST"]) 
 def delete_schedule():
     with SessionLocal() as s:
-        week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
-        if hasattr(Assignment, 'dismissed_timeoff'):
-            s.execute(update(Assignment).where(Assignment.week_id == week.id).values(value="Set", dismissed_timeoff=0))
-        else:
-            s.execute(update(Assignment).where(Assignment.week_id == week.id).values(value="Set"))
-        s.commit()
-    return redirect(url_for("index"))
+        week = s.scalar(select(Week).where(Week.start_date == FOUR_WEEK_BASELINE))
+        token = _delete_period_with_undo(s, week) if week else None
+    redirect_args = {}
+    if token:
+        redirect_args["undo"] = token
+    return redirect(url_for("schedules_page", **redirect_args))
 
 
 @app.route("/week/<int:week_id>/delete", methods=["POST"]) 
@@ -2322,18 +2615,50 @@ def delete_week_schedule(week_id: int):
         if not wk:
             return redirect(url_for("schedules_page"))
 
-        # Protect the baseline week: reset instead of deleting
-        baseline = date(2025, 9, 18)
-        if wk.start_date == baseline:
-            s.execute(update(Assignment).where(Assignment.week_id == week_id).values(value="Set"))
-            s.commit()
-            return redirect(url_for("view_week", week_id=week_id))
+        token = _delete_period_with_undo(s, wk)
+    redirect_args = {}
+    if token:
+        redirect_args["undo"] = token
+    return redirect(url_for("schedules_page", **redirect_args))
 
-        # Delete assignments for this week, then the week itself
-        s.execute(delete(Assignment).where(Assignment.week_id == week_id))
-        s.delete(wk)
+
+@app.route("/undo-delete/<token>", methods=["POST"])
+def undo_delete_period(token: str):
+    _prune_expired_period_undos()
+    payload = _pending_period_undos.get(token)
+    if not payload or payload.get("expires", 0) <= time.time():
+        _pending_period_undos.pop(token, None)
+        return redirect(url_for("schedules_page", undo_status="expired"))
+
+    weeks_payload = payload.get("weeks", [])
+    with SessionLocal() as s:
+        for week_info in weeks_payload:
+            start = date.fromisoformat(week_info["start_date"])
+            week = s.scalar(select(Week).where(Week.start_date == start))
+            if not week:
+                week = Week(start_date=start)
+                s.add(week)
+                s.flush()
+            s.execute(delete(Assignment).where(Assignment.week_id == week.id))
+            for assignment_info in week_info.get("assignments", []):
+                assign_date = date.fromisoformat(assignment_info["date"])
+                assignment = Assignment(
+                    week_id=week.id,
+                    employee_id=assignment_info["employee_id"],
+                    date=assign_date,
+                    value=assignment_info["value"],
+                )
+                if hasattr(Assignment, "dismissed_timeoff"):
+                    assignment.dismissed_timeoff = assignment_info.get("dismissed", 0) or 0
+                s.add(assignment)
         s.commit()
-    return redirect(url_for("schedules_page"))
+
+    label = payload.get("label")
+    _pending_period_undos.pop(token, None)
+    redirect_args = {"undo_status": "restored"}
+    if label:
+        redirect_args["label"] = label
+    return redirect(url_for("schedules_page", **redirect_args))
 
 
 @app.route("/week/<int:week_id>/prev")

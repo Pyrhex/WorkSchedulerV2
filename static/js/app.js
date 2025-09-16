@@ -373,6 +373,43 @@ function wireWeekNav() {
   }
 }
 
+function initUndoCountdown() {
+  const banner = document.querySelector('[data-undo-deadline]');
+  if (!banner) return;
+  const deadlineAttr = banner.getAttribute('data-undo-deadline');
+  if (!deadlineAttr) return;
+  const deadlineMs = parseInt(deadlineAttr, 10);
+  if (!deadlineMs) return;
+  const secondsEl = banner.querySelector('[data-undo-seconds]');
+  const undoButton = banner.querySelector('button');
+
+  const updateCountdown = () => {
+    const remainingMs = deadlineMs - Date.now();
+    const remaining = Math.max(0, Math.round(remainingMs / 1000));
+    if (secondsEl) {
+      secondsEl.textContent = remaining.toString();
+    }
+    if (remaining <= 0) {
+      if (undoButton) {
+        undoButton.disabled = true;
+        undoButton.classList.remove('secondary');
+        undoButton.classList.add('ghost');
+        undoButton.textContent = 'Undo expired';
+      }
+      banner.removeAttribute('data-undo-deadline');
+      return true;
+    }
+    return false;
+  };
+
+  if (updateCountdown()) return;
+  const timer = setInterval(() => {
+    if (updateCountdown()) {
+      clearInterval(timer);
+    }
+  }, 1000);
+}
+
 function wireGenerateSchedule() {
   const form = document.getElementById('generate-form');
   if (!form) return;
@@ -401,6 +438,222 @@ function confirmGenerateSchedule() {
   );
 }
 
+function wireEmployeeSorting() {
+  const bodies = document.querySelectorAll('.employee-table-body[data-section-id]');
+  if (!bodies.length) return;
+
+  let draggedRow = null;
+  let dragSourceBody = null;
+  let startOrder = null;
+
+  const orderFor = (tbody) =>
+    Array.from(tbody.querySelectorAll('tr[data-employee-id]'))
+      .map(row => row.getAttribute('data-employee-id'))
+      .join(',');
+
+  const restoreOrder = (tbody, orderString) => {
+    if (!orderString) return;
+    const ids = orderString.split(',').filter(Boolean);
+    if (!ids.length) return;
+    const rowsById = {};
+    tbody.querySelectorAll('tr[data-employee-id]').forEach(row => {
+      rowsById[row.getAttribute('data-employee-id')] = row;
+    });
+    ids.forEach(id => {
+      const row = rowsById[id];
+      if (row) tbody.appendChild(row);
+    });
+  };
+
+  bodies.forEach(tbody => {
+    tbody.querySelectorAll('tr[data-employee-id]').forEach(row => {
+      row.addEventListener('dragstart', (e) => {
+        draggedRow = row;
+        dragSourceBody = tbody;
+        startOrder = orderFor(tbody);
+        row.classList.add('dragging');
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', row.getAttribute('data-employee-id') || '');
+        }
+      });
+
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        if (dragSourceBody && startOrder) {
+          restoreOrder(dragSourceBody, startOrder);
+        }
+        draggedRow = null;
+        dragSourceBody = null;
+        startOrder = null;
+      });
+    });
+
+    tbody.addEventListener('dragover', (e) => {
+      if (!draggedRow || dragSourceBody !== tbody) return;
+      e.preventDefault();
+      const targetRow = e.target.closest('tr[data-employee-id]');
+      if (!targetRow || targetRow === draggedRow) return;
+      const rect = targetRow.getBoundingClientRect();
+      const before = e.clientY < rect.top + rect.height / 2;
+      tbody.insertBefore(draggedRow, before ? targetRow : targetRow.nextSibling);
+    });
+
+    tbody.addEventListener('drop', async (e) => {
+      if (!draggedRow || dragSourceBody !== tbody) return;
+      e.preventDefault();
+      draggedRow.classList.remove('dragging');
+      const newOrder = orderFor(tbody);
+      const sectionId = Number(tbody.getAttribute('data-section-id'));
+      const previousOrder = startOrder;
+      draggedRow = null;
+      dragSourceBody = null;
+      startOrder = null;
+      if (!sectionId || newOrder === previousOrder) {
+        return;
+      }
+      const ids = newOrder
+        .split(',')
+        .filter(Boolean)
+        .map(id => Number(id));
+      try {
+        const res = await fetch('/admin/employees/reorder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ section_id: sectionId, employee_ids: ids }),
+        });
+        const data = await res.json().catch(() => ({ ok: false }));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Save failed');
+        }
+        showToast('Order saved');
+      } catch (err) {
+        console.error(err);
+        const message = err && typeof err.message === 'string' && err.message.trim()
+          ? err.message
+          : 'Unable to save order';
+        showToast(message);
+        restoreOrder(tbody, previousOrder);
+      }
+    });
+  });
+}
+
+function wireEmployeeRoleChanges() {
+  document.querySelectorAll('.employee-role-select[data-employee-id]').forEach(sel => {
+    const employeeId = Number(sel.getAttribute('data-employee-id'));
+    sel.addEventListener('change', async () => {
+      if (!employeeId) return;
+      const previous = sel.getAttribute('data-current-role');
+      const sectionId = Number(sel.value);
+      try {
+        const res = await fetch(`/admin/employees/${employeeId}/role`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ section_id: sectionId }),
+        });
+        const data = await res.json().catch(() => ({ ok: false }));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Unable to update role');
+        }
+        sel.setAttribute('data-current-role', String(sectionId));
+        const allRoles = Array.isArray(window.employeeRoleOptions) ? window.employeeRoleOptions : [];
+        const row = sel.closest('tr');
+        const secondarySelect = row ? row.querySelector('.employee-secondary-select') : null;
+        if (secondarySelect) {
+          const previousSelected = secondarySelect.getAttribute('data-selected-secondary') || '';
+          const filteredSelected = previousSelected === String(sectionId) ? '' : previousSelected;
+          secondarySelect.innerHTML = '';
+
+          const noneOption = document.createElement('option');
+          noneOption.value = '';
+          noneOption.textContent = 'None';
+          if (!filteredSelected) {
+            noneOption.selected = true;
+          }
+          secondarySelect.appendChild(noneOption);
+
+          allRoles.forEach(role => {
+            if (!role || role.id === undefined || role.name === undefined) return;
+            if (Number(role.id) === sectionId) return;
+            const opt = document.createElement('option');
+            opt.value = String(role.id);
+            opt.textContent = role.name;
+            if (filteredSelected && String(role.id) === filteredSelected) {
+              opt.selected = true;
+            }
+            secondarySelect.appendChild(opt);
+          });
+
+          // Ensure selection persists or falls back to none
+          if (filteredSelected) {
+            const match = secondarySelect.querySelector(`option[value="${filteredSelected}"]`);
+            if (match) {
+              match.selected = true;
+            } else {
+              secondarySelect.value = '';
+            }
+          } else {
+            secondarySelect.value = '';
+          }
+          secondarySelect.setAttribute('data-selected-secondary', filteredSelected);
+        }
+        showToast('Role updated');
+      } catch (err) {
+        console.error(err);
+        const message = err && typeof err.message === 'string' && err.message.trim()
+          ? err.message
+          : 'Unable to update role';
+        showToast(message);
+        if (previous !== null) {
+          sel.value = previous;
+        }
+      }
+    });
+  });
+}
+
+function wireEmployeeSecondaryRoles() {
+  document.querySelectorAll('.employee-secondary-select[data-employee-id]').forEach(sel => {
+    const employeeId = Number(sel.getAttribute('data-employee-id'));
+    sel.addEventListener('change', async () => {
+      if (!employeeId) return;
+      const previous = sel.getAttribute('data-selected-secondary') || '';
+      const selectedValue = sel.value;
+      const payload = {
+        secondary_role: selectedValue ? Number(selectedValue) : null,
+      };
+      try {
+        const res = await fetch(`/admin/employees/${employeeId}/roles`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({ ok: false }));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Unable to update secondary role');
+        }
+        const updated = data.secondary_role;
+        sel.setAttribute('data-selected-secondary', updated ? String(updated) : '');
+        if (updated) {
+          sel.value = String(updated);
+        } else {
+          sel.value = '';
+        }
+        showToast('Secondary role updated');
+      } catch (err) {
+        console.error(err);
+        const message = err && typeof err.message === 'string' && err.message.trim()
+          ? err.message
+          : 'Unable to update secondary role';
+        showToast(message);
+        sel.value = previous ? previous : '';
+        sel.setAttribute('data-selected-secondary', previous);
+      }
+    });
+  });
+}
+
 // Make functions globally available
 window.confirmGenerateSchedule = confirmGenerateSchedule;
 
@@ -410,6 +663,10 @@ document.addEventListener('DOMContentLoaded', () => {
   initLiveUpdates();
   wireWeekNav();
   wireGenerateSchedule();
+  wireEmployeeSorting();
+  wireEmployeeRoleChanges();
+  wireEmployeeSecondaryRoles();
   initSelectColors();
   updateConflictsUI();
+  initUndoCountdown();
 });

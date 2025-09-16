@@ -2,7 +2,7 @@
 
 {% block content %}
   <div class="content-inner">
-    <section class="schedule-header">
+    <section class="schedule-header employees-header">
       <div class="title">Employees</div>
       <div class="actions">
         <a class="btn primary" href="/admin/employees/add">Add Employee</a>
@@ -10,6 +10,9 @@
     </section>
 
     <div class="tables">
+      <script>
+        window.employeeRoleOptions = {{ role_options | tojson }};
+      </script>
       {% for sec_name, people in employees.items() %}
         <div class="table-card">
           <div class="table-title">{{ sec_name }}</div>
@@ -21,30 +24,47 @@
                 <table style="width:100%; border-collapse: collapse;">
                   <thead>
                     <tr style="text-align:left; border-bottom:1px solid #e2e8f0;">
+                      <th style="padding:8px; width:36px;">&nbsp;</th>
                       <th style="padding:8px;">Name</th>
                       <th style="padding:8px;">Role</th>
                       <th style="padding:8px;">Secondary Roles</th>
                       <th style="padding:8px; width: 320px;">Actions</th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody class="employee-table-body" data-section-id="{{ section_ids[sec_name] }}">
                     {% for p in people %}
-                      <tr style="border-top:1px solid #f1f5f9;">
+                      <tr class="employee-row" data-employee-id="{{ p.id }}" draggable="true" style="border-top:1px solid #f1f5f9;">
+                        <td class="drag-cell" style="padding:8px; text-align:center;">
+                          <span class="drag-handle" title="Drag to reorder" aria-label="Drag to reorder"></span>
+                        </td>
                         <td style="padding:8px;">{{ p.name }}</td>
                         <td style="padding:8px;">
-                          <form method="post" action="/admin/employees/{{ p.id }}/role" style="display:flex; gap:8px; align-items:center;">
-                            <select name="role" class="shift-select" style="max-width:200px;">
-                              {% for r in roles %}
-                                <option value="{{ r.name }}" {% if r.id == p.section_id %}selected{% endif %}>{{ r.name }}</option>
-                              {% endfor %}
-                            </select>
-                            <button class="btn" type="submit">Update</button>
-                          </form>
+                          <select
+                            class="shift-select employee-role-select"
+                            style="max-width:200px;"
+                            data-employee-id="{{ p.id }}"
+                            data-current-role="{{ p.section_id }}"
+                          >
+                            {% for r in roles %}
+                              <option value="{{ r.id }}" {% if r.id == p.section_id %}selected{% endif %}>{{ r.name }}</option>
+                            {% endfor %}
+                          </select>
                         </td>
                         <td style="padding:8px; color:#475569;">
-                          <form method="get" action="/admin/employees/{{ p.id }}/roles" style="display:inline-block;">
-                            <button class="btn" type="submit">Manage</button>
-                          </form>
+                          {% set current_secondary = secondary_roles.get(p.id) %}
+                          <select
+                            class="shift-select employee-secondary-select"
+                            style="max-width:200px;"
+                            data-employee-id="{{ p.id }}"
+                            data-selected-secondary="{{ current_secondary if current_secondary is not none else '' }}"
+                          >
+                            <option value="" {% if current_secondary is none %}selected{% endif %}>None</option>
+                            {% for r in roles %}
+                              {% if r.id != p.section_id %}
+                                <option value="{{ r.id }}" {% if r.id == current_secondary %}selected{% endif %}>{{ r.name }}</option>
+                              {% endif %}
+                            {% endfor %}
+                          </select>
                         </td>
                         <td style="padding:8px;">
                           <form method="get" action="/admin/employees/{{ p.id }}/availability" style="display:inline-block;">
