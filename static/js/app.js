@@ -176,6 +176,7 @@ function wireShiftSelects() {
             showToast('Blocked: approved time off');
             return;
           }
+          showToast(data.error || 'Save failed');
           throw new Error(data.error || 'Failed');
         }
         updateSelectClass(sel, section, value);
