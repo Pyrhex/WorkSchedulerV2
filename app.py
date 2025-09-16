@@ -632,7 +632,9 @@ def build_week_context(week_id: int):
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         period_start, period_end = four_week_period_bounds(wk.start_date)
-        dates = week_dates(wk.start_date)
+        week_start = wk.start_date
+        week_end = week_start + timedelta(days=6)
+        dates = week_dates(week_start)
         week_keys = {d["key"] for d in dates}
         # Sections and employees
         sections = {sec.name: {"employees": [], "assignments": {}, "shifts": []} for sec in s.scalars(select(Section))}
@@ -716,7 +718,13 @@ def build_week_context(week_id: int):
         to_list = []
         vacation_days: dict[str, set[str]] = {}
         dismissed_days: dict[str, set[str]] = {}
-        for t in s.scalars(select(TimeOff)):
+        # Only surface time off that overlaps the displayed four-week period
+        timeoff_query = (
+            select(TimeOff)
+            .where(TimeOff.to_date >= week_start, TimeOff.from_date <= week_end)
+            .order_by(TimeOff.from_date, TimeOff.to_date, TimeOff.name)
+        )
+        for t in s.scalars(timeoff_query):
             same_day = t.from_date == t.to_date
             label = t.from_date.strftime("%b %d") if same_day else f"{t.from_date.strftime('%b %d')} to {t.to_date.strftime('%b %d')}"
             to_list.append({

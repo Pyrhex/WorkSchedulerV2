@@ -88,6 +88,29 @@ body {
 .btn.secondary { background: var(--success); color: white; }
 .btn.danger { background: var(--danger); color: white; }
 .btn.ghost { background: transparent; border-color: var(--grid); color: var(--text); }
+.btn.delete-icon {
+  background: var(--danger);
+  color: #ffffff;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  line-height: 0;
+  vertical-align: top;
+}
+.btn.delete-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.btn.delete-icon svg * {
+  fill: none;
+  stroke: currentColor;
+}
+.btn.delete-icon:hover,
+.btn.delete-icon:focus { background: #b91c1c; }
 .btn.sm { padding: 6px 10px; font-size: 13px; }
 .btn.purple { background: var(--purple); color: #ffffff; }
 /* Colored outline variants for subtle emphasis */
@@ -190,6 +213,23 @@ body {
 .timeoff-item .dates { color: var(--muted); font-size: 13px; }
 .timeoff-item .status.approved { color: var(--success); font-weight: 700; margin-left: 6px; }
 .timeoff-item .status.pending { color: #9a3412; font-weight: 700; margin-left: 6px; }
+.timeoff-delete {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+  margin-left: 16px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+.timeoff-delete:hover,
+.timeoff-delete:focus {
+  color: #475569;
+  opacity: 1;
+}
 
 /* Toggle switch */
 .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
