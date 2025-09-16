@@ -1405,7 +1405,8 @@ def assign():
 
         a = s.scalar(select(Assignment).where(Assignment.week_id == week.id, Assignment.employee_id == emp.id, Assignment.date == dte))
         if not a:
-            return jsonify({"ok": False, "error": "Assignment not found"}), 404
+            a = Assignment(week_id=week.id, employee_id=emp.id, date=dte, value="Set")
+            s.add(a)
         # If there is approved time off on this date, allow manual override:
         # - When user selects a non-time-off value, record it and mark dismissed_timeoff=1
         #   to indicate a scheduled override despite approved time off.

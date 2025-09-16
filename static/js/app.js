@@ -176,8 +176,7 @@ function wireShiftSelects() {
             showToast('Blocked: approved time off');
             return;
           }
-          showToast(data.error || 'Save failed');
-          throw new Error(data.error || 'Failed');
+          throw new Error(data.error || 'Save failed');
         }
         updateSelectClass(sel, section, value);
         updateCoverageUI(data);
@@ -185,7 +184,8 @@ function wireShiftSelects() {
         showToast('Saved');
       } catch (err) {
         console.error(err);
-        showToast('Save failed');
+        const message = err && typeof err.message === 'string' && err.message.trim() ? err.message : 'Save failed';
+        showToast(message);
       }
     });
   });
