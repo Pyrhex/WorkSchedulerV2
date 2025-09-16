@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import time
 import uuid
@@ -10,6 +11,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for, send_file, Response
 from flask import stream_with_context
+from dotenv import load_dotenv
+import requests
 from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from openpyxl import Workbook, load_workbook
@@ -17,7 +20,52 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 
+load_dotenv()
+
+
 app = Flask(__name__)
+
+
+def _post_discord_message(content: str, *, title: Optional[str] = None, color: Optional[int] = None) -> None:
+    """Send an embed to the configured Discord webhook, if available."""
+    url = os.getenv("DISCORD_WEBHOOK_URL")
+    if not url or not content:
+        return
+    embed_payload = {
+        "description": content,
+    }
+    if title:
+        embed_payload["title"] = title
+    if color is not None:
+        embed_payload["color"] = color
+    try:
+        response = requests.post(url, json={"embeds": [embed_payload]}, timeout=5)
+        if response.status_code >= 400:
+            app.logger.warning(
+                "Discord webhook returned %s: %s",
+                response.status_code,
+                response.text[:200],
+            )
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        app.logger.warning("Discord webhook error: %s", exc)
+
+
+def _notify_schedule_change(employee: str, section: str, shift_date: date, value: str) -> None:
+    message = (
+        "Schedule update: "
+        f"{employee} assigned to {value or 'Set'} on {shift_date.isoformat()} ({section})."
+    )
+    _post_discord_message(message, title="Schedule Updated", color=0x5865F2)
+
+
+def _notify_timeoff_submission(name: str, role: str, start: date, end: date, approved: bool, vacation: bool) -> None:
+    status = "approved" if approved else "pending approval"
+    vacation_note = "vacation" if vacation else "time off"
+    message = (
+        "Time off request submitted: "
+        f"{name} ({role}) {vacation_note} from {start.isoformat()} to {end.isoformat()} ({status})."
+    )
+    _post_discord_message(message, title="Time Off Submitted", color=0x57F287)
 
 
 @app.after_request
@@ -1476,12 +1524,21 @@ def timeoff_new():
         with SessionLocal() as s:
             employees = list(s.scalars(select(Employee)))
         return render_template("timeoff_new.html", employees=employees, error="End date must be after start date"), 400
+    timeoff_info = None
     with SessionLocal() as s:
         emp = s.scalar(select(Employee).where(Employee.name == name))
         role = s.get(Section, emp.section_id).name if emp else 'Unknown'
         rec = TimeOff(name=name, role=role, from_date=from_d, to_date=to_d, approved=approved, vacation=vacation)
         s.add(rec)
         s.commit()
+        timeoff_info = {
+            "name": rec.name,
+            "role": rec.role,
+            "start": rec.from_date,
+            "end": rec.to_date,
+            "approved": bool(rec.approved),
+            "vacation": bool(getattr(rec, "vacation", False)),
+        }
         # If approved, update assignments for current week and broadcast
         if approved:
             week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
@@ -1536,6 +1593,8 @@ def timeoff_new():
                     "maintenance_counts": maintenance_counts,
                     "double_booked": double_booked_snapshot(week.id),
                 })
+    if timeoff_info:
+        _notify_timeoff_submission(**timeoff_info)
     return redirect(url_for('timeoff_page'))
 
 
@@ -1601,6 +1660,7 @@ def assign():
     value = data.get("value")
     week_id = data.get("week_id")  # Get week_id from request
 
+    final_value = value or "Set"
     with SessionLocal() as s:
         # Use provided week_id or fall back to default week
         if week_id:
@@ -1660,6 +1720,7 @@ def assign():
             except Exception:
                 pass
         s.commit()
+        final_value = a.value or "Set"
 
     (
         counts,
@@ -1677,7 +1738,7 @@ def assign():
         maintenance_required,
         maintenance_counts,
     ) = coverage_snapshot_db(week.id)
-    return jsonify({
+    response_payload = {
         "ok": True,
         "counts": counts,
         "missing": missing,
@@ -1694,7 +1755,10 @@ def assign():
         "maintenance_required": maintenance_required,
         "maintenance_counts": maintenance_counts,
         "double_booked": double_booked_snapshot(week.id),
-    })
+    }
+
+    _notify_schedule_change(employee_name, section, dte, final_value)
+    return jsonify(response_payload)
 
 
 @app.route("/timeoff/delete/<int:tid>", methods=["POST"])
