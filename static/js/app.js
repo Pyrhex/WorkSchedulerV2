@@ -25,6 +25,9 @@ function selectClassForValue(section, value) {
     if (value.startsWith('PM')) return 'select-purple';
     if (value.startsWith('Crew')) return 'select-red';
   }
+  if (section === 'Maintenance') {
+    if (value === '8AM–4:30PM') return 'select-green';
+  }
   return '';
 }
 
@@ -50,6 +53,7 @@ function updateCoverageUI(data) {
     variant_counts,
     shuttle_missing,
     bb_missing,
+    maintenance_missing,
     fd_duplicates,
   } = data;
 
@@ -85,6 +89,15 @@ function updateCoverageUI(data) {
       const dk = h.getAttribute('data-date');
       if (!dk) return;
       if (bb_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
+    });
+
+  // Update Maintenance headers using Maintenance missing map
+  document
+    .querySelectorAll('.schedule-table[aria-label="Maintenance"] .row.header .cell.head[data-date]')
+    .forEach(h => {
+      const dk = h.getAttribute('data-date');
+      if (!dk) return;
+      if (maintenance_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
     });
 
   // Missing list with detailed Front Desk variant information

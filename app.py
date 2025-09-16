@@ -163,6 +163,12 @@ SHUTTLE_SHIFTS = [
     "Crew (5:45PM–1:45AM)",
 ]
 
+MAINTENANCE_SHIFTS = [
+    "Set",
+    TIME_OFF_LABEL,
+    "8AM–4:30PM",
+]
+
 
 def init_db_once():
     Base.metadata.create_all(engine)
@@ -202,15 +208,19 @@ def init_db_once():
                 conn.exec_driver_sql("ALTER TABLE assignments ADD COLUMN dismissed_timeoff INTEGER DEFAULT 0")
 
         # Ensure sections exist (and update FD required to 6)
-        names = {n: None for n in ["Breakfast Bar", "Front Desk", "Shuttle"]}
+        names = {
+            "Breakfast Bar": None,
+            "Front Desk": 6,
+            "Shuttle": None,
+            "Maintenance": 1,
+        }
         existing = {sec.name: sec for sec in s.scalars(select(Section))}
-        for n in names.keys():
+        for n, required in names.items():
             if n in existing:
-                if n == "Front Desk" and (existing[n].required_per_day or 0) != 6:
-                    existing[n].required_per_day = 6
+                if required is not None and (existing[n].required_per_day or 0) != required:
+                    existing[n].required_per_day = required
             else:
-                rp = 6 if n == "Front Desk" else None
-                s.add(Section(name=n, required_per_day=rp))
+                s.add(Section(name=n, required_per_day=required))
         s.flush()
 
         # Refresh sections after potential inserts
@@ -308,6 +318,7 @@ def seed_example_assignments_db(week_id: int, s: Session):
     bb_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Breakfast Bar"))]
     fd_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Front Desk"))]
     sh_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Shuttle"))]
+    maint_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Maintenance"))]
     wk = s.get(Week, week_id)
     for d in daterange(wk.start_date, 7):
         # Breakfast Bar
@@ -347,6 +358,15 @@ def seed_example_assignments_db(week_id: int, s: Session):
                     "Set"
                 ])
 
+        # Maintenance (one sample per day if available)
+        if maint_emp_ids:
+            pick = choice(maint_emp_ids)
+            emp = s.get(Employee, pick)
+            if emp and not has_any_timeoff(emp.name, d, s):
+                a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == pick, Assignment.date == d))
+                if a:
+                    a.value = choice(["8AM–4:30PM", "Set"])
+
 
 def has_generated_schedule(week_id: int) -> bool:
     """Check if the schedule has already been generated (has non-'Set' assignments)"""
@@ -355,7 +375,7 @@ def has_generated_schedule(week_id: int) -> bool:
         return any_non_set is not None
 
 
-def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict, dict]:
+def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict, dict, dict, int, dict]:
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         dates = [d.isoformat() for d in daterange(wk.start_date, 7)]
@@ -374,6 +394,10 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         bb_variants = ["5AM–12PM", "6AM–12PM", "7AM–12PM"]
         bb_counts = {k: {variant: 0 for variant in bb_variants} for k in dates}
         bb_missing = {k: False for k in dates}
+
+        # Initialize Maintenance counts (1 per day required)
+        maint_counts = {k: 0 for k in dates}
+        maint_missing = {k: False for k in dates}
 
         # Track Front Desk duplicates of exact staggered times per variant (e.g., two at 2:15PM)
         fd_duplicates = {k: False for k in dates}
@@ -417,6 +441,10 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             # Breakfast variants (exact labels)
             if a.value in bb_variants:
                 bb_counts[date_key][a.value] += 1
+
+            # Maintenance (single variant)
+            if a.value == "8AM–4:30PM":
+                maint_counts[date_key] += 1
         
         # Check for missing coverage: each variant needs at least 2 people
         for date_key in dates:
@@ -456,7 +484,28 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                     break
         bb_required = 3
 
-        return total_counts, missing, required, counts, sh_missing, sh_required, sh_counts, bb_missing, bb_required, bb_counts, fd_duplicates
+        # Maintenance missing threshold (1 per day)
+        for date_key in dates:
+            if maint_counts[date_key] < 1:
+                maint_missing[date_key] = True
+        maint_required = 1
+
+        return (
+            total_counts,
+            missing,
+            required,
+            counts,
+            sh_missing,
+            sh_required,
+            sh_counts,
+            bb_missing,
+            bb_required,
+            bb_counts,
+            fd_duplicates,
+            maint_missing,
+            maint_required,
+            maint_counts,
+        )
 
 
 def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
@@ -546,6 +595,8 @@ def build_week_context(week_id: int):
                 sections[sec_name]["shifts"] = FRONT_DESK_SHIFTS
             elif sec_name == "Shuttle":
                 sections[sec_name]["shifts"] = SHUTTLE_SHIFTS
+            elif sec_name == "Maintenance":
+                sections[sec_name]["shifts"] = MAINTENANCE_SHIFTS
 
         # Detect employees listed in multiple sections
         emp_in_sections: dict[str, set[str]] = {}
@@ -644,7 +695,22 @@ def index():
     with SessionLocal() as s:
         week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
         ctx = build_week_context(week.id)
-    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+    (
+        counts,
+        missing,
+        required,
+        variant_counts,
+        shuttle_missing,
+        shuttle_required,
+        shuttle_counts,
+        bb_missing,
+        bb_required,
+        bb_counts,
+        fd_duplicates,
+        maintenance_missing,
+        maintenance_required,
+        maintenance_counts,
+    ) = coverage_snapshot_db(week.id)
     return render_template(
         "schedule.html",
         meta=ctx["meta"],
@@ -652,6 +718,7 @@ def index():
         breakfast=ctx["breakfast"],
         front_desk=ctx["front_desk"],
         shuttle=ctx["week"]["sections"].get("Shuttle"),
+        maintenance=ctx["week"]["sections"].get("Maintenance"),
         counts=counts,
         missing=missing,
         required=required,
@@ -662,6 +729,9 @@ def index():
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
+        maintenance_missing=maintenance_missing,
+        maintenance_required=maintenance_required,
+        maintenance_counts=maintenance_counts,
         fd_duplicates=fd_duplicates,
         time_off=ctx["time_off"],
         vacation_days=ctx.get("vacation_days", {}),
@@ -723,7 +793,22 @@ def format_shift(label: str) -> str:
 @app.route("/week/<int:week_id>")
 def view_week(week_id: int):
     ctx = build_week_context(week_id)
-    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week_id)
+    (
+        counts,
+        missing,
+        required,
+        variant_counts,
+        shuttle_missing,
+        shuttle_required,
+        shuttle_counts,
+        bb_missing,
+        bb_required,
+        bb_counts,
+        fd_duplicates,
+        maintenance_missing,
+        maintenance_required,
+        maintenance_counts,
+    ) = coverage_snapshot_db(week_id)
     return render_template(
         "schedule.html",
         meta=ctx["meta"],
@@ -731,6 +816,7 @@ def view_week(week_id: int):
         breakfast=ctx["breakfast"],
         front_desk=ctx["front_desk"],
         shuttle=ctx["week"]["sections"].get("Shuttle"),
+        maintenance=ctx["week"]["sections"].get("Maintenance"),
         counts=counts,
         missing=missing,
         required=required,
@@ -741,6 +827,9 @@ def view_week(week_id: int):
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
+        maintenance_missing=maintenance_missing,
+        maintenance_required=maintenance_required,
+        maintenance_counts=maintenance_counts,
         fd_duplicates=fd_duplicates,
         time_off=ctx["time_off"],
         vacation_days=ctx.get("vacation_days", {}),
@@ -918,7 +1007,7 @@ def admin_add_employee():
         week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
         for d in daterange(week.start_date, 7):
             s.add(Assignment(week_id=week.id, employee_id=emp.id, date=d, value="Set"))
-    s.commit()
+        s.commit()
     return redirect(url_for("list_employees"))
 
 
@@ -933,6 +1022,7 @@ def list_employees():
         "Breakfast Bar": [o for o in BREAKFAST_SHIFTS],
         "Front Desk": [o for o in FRONT_DESK_SHIFTS],
         "Shuttle": [o for o in SHUTTLE_SHIFTS],
+        "Maintenance": [o for o in MAINTENANCE_SHIFTS],
     }
     return render_template("employees.html", employees=employees, roles=sections, shift_options=shift_options)
 
@@ -1056,6 +1146,8 @@ def role_shift_variants(role_name: str) -> list[str]:
         return [s for s in FRONT_DESK_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
     if role_name == "Shuttle":
         return [s for s in SHUTTLE_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
+    if role_name == "Maintenance":
+        return [s for s in MAINTENANCE_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
     return []
 
 
@@ -1067,6 +1159,8 @@ def role_availability_variants(role_name: str) -> list[str]:
         return ["AM", "PM", "Audit"]
     if role_name == "Shuttle":
         return ["AM (3:30AM–11:30AM)", "Midday (10:30AM–6:30PM)", "PM (5:30PM–1:30AM)", "Crew (5:45PM–1:45AM)"]
+    if role_name == "Maintenance":
+        return ["8AM–4:30PM"]
     return []
 
 
@@ -1193,7 +1287,22 @@ def timeoff_new():
                         if a:
                             a.value = TIME_OFF_LABEL
                 s.commit()
-                counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+                (
+                    counts,
+                    missing,
+                    required,
+                    variant_counts,
+                    shuttle_missing,
+                    shuttle_required,
+                    shuttle_counts,
+                    bb_missing,
+                    bb_required,
+                    bb_counts,
+                    fd_duplicates,
+                    maintenance_missing,
+                    maintenance_required,
+                    maintenance_counts,
+                ) = coverage_snapshot_db(week.id)
                 _broadcast({
                     "type": "timeoff",
                     "op": "new",
@@ -1217,6 +1326,9 @@ def timeoff_new():
                     "bb_required": bb_required,
                     "bb_counts": bb_counts,
                     "fd_duplicates": fd_duplicates,
+                    "maintenance_missing": maintenance_missing,
+                    "maintenance_required": maintenance_required,
+                    "maintenance_counts": maintenance_counts,
                     "double_booked": double_booked_snapshot(week.id),
                 })
     return redirect(url_for('timeoff_page'))
@@ -1323,7 +1435,22 @@ def assign():
                 pass
         s.commit()
 
-    counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+    (
+        counts,
+        missing,
+        required,
+        variant_counts,
+        shuttle_missing,
+        shuttle_required,
+        shuttle_counts,
+        bb_missing,
+        bb_required,
+        bb_counts,
+        fd_duplicates,
+        maintenance_missing,
+        maintenance_required,
+        maintenance_counts,
+    ) = coverage_snapshot_db(week.id)
     return jsonify({
         "ok": True,
         "counts": counts,
@@ -1337,6 +1464,9 @@ def assign():
         "bb_required": bb_required,
         "bb_counts": bb_counts,
         "fd_duplicates": fd_duplicates,
+        "maintenance_missing": maintenance_missing,
+        "maintenance_required": maintenance_required,
+        "maintenance_counts": maintenance_counts,
         "double_booked": double_booked_snapshot(week.id),
     })
 
@@ -1367,7 +1497,22 @@ def delete_timeoff(tid):
         
         # Only update coverage if we have a valid week
         if week:
-            counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+            (
+                counts,
+                missing,
+                required,
+                variant_counts,
+                shuttle_missing,
+                shuttle_required,
+                shuttle_counts,
+                bb_missing,
+                bb_required,
+                bb_counts,
+                fd_duplicates,
+                maintenance_missing,
+                maintenance_required,
+                maintenance_counts,
+            ) = coverage_snapshot_db(week.id)
             # Broadcast deletion to live listeners
             _broadcast({
                 "type": "timeoff",
@@ -1392,6 +1537,9 @@ def delete_timeoff(tid):
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
                 "fd_duplicates": fd_duplicates,
+                "maintenance_missing": maintenance_missing,
+                "maintenance_required": maintenance_required,
+                "maintenance_counts": maintenance_counts,
                 "double_booked": double_booked_snapshot(week.id),
             })
             return jsonify({
@@ -1407,6 +1555,9 @@ def delete_timeoff(tid):
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
                 "fd_duplicates": fd_duplicates,
+                "maintenance_missing": maintenance_missing,
+                "maintenance_required": maintenance_required,
+                "maintenance_counts": maintenance_counts,
                 "double_booked": double_booked_snapshot(week.id),
             })
         else:
@@ -1437,7 +1588,22 @@ def toggle_timeoff():
                 elif not approved and a.value == TIME_OFF_LABEL and in_range:
                     a.value = "Set"
         s.commit()
-        counts, missing, required, variant_counts, shuttle_missing, shuttle_required, shuttle_counts, bb_missing, bb_required, bb_counts, fd_duplicates = coverage_snapshot_db(week.id)
+        (
+            counts,
+            missing,
+            required,
+            variant_counts,
+            shuttle_missing,
+            shuttle_required,
+            shuttle_counts,
+            bb_missing,
+            bb_required,
+            bb_counts,
+            fd_duplicates,
+            maintenance_missing,
+            maintenance_required,
+            maintenance_counts,
+        ) = coverage_snapshot_db(week.id)
         item = {
             "id": to.id,
             "name": to.name,
@@ -1465,6 +1631,9 @@ def toggle_timeoff():
             "bb_required": bb_required,
             "bb_counts": bb_counts,
             "fd_duplicates": fd_duplicates,
+            "maintenance_missing": maintenance_missing,
+            "maintenance_required": maintenance_required,
+            "maintenance_counts": maintenance_counts,
             "double_booked": double_booked_snapshot(week.id),
         })
     return jsonify({
@@ -1481,6 +1650,9 @@ def toggle_timeoff():
         "bb_required": bb_required,
         "bb_counts": bb_counts,
         "fd_duplicates": fd_duplicates,
+        "maintenance_missing": maintenance_missing,
+        "maintenance_required": maintenance_required,
+        "maintenance_counts": maintenance_counts,
         "double_booked": double_booked_snapshot(week.id),
     })
 
@@ -1792,9 +1964,11 @@ def generate_4_week_schedule(start_week_id: int):
         fd_emp_ids = employees_for_section("Front Desk")
         bb_emp_ids = employees_for_section("Breakfast Bar")
         sh_emp_ids = employees_for_section("Shuttle")
+        maint_emp_ids = employees_for_section("Maintenance")
         _log(f"FD-capable: {[emp_name.get(i,'?') for i in fd_emp_ids]}")
         _log(f"BB-capable: {[emp_name.get(i,'?') for i in bb_emp_ids]}")
         _log(f"SH-capable: {[emp_name.get(i,'?') for i in sh_emp_ids]}")
+        _log(f"MA-capable: {[emp_name.get(i,'?') for i in maint_emp_ids]}")
 
         for week_offset in range(4):
             start_d = base_week.start_date + timedelta(days=7 * week_offset)
@@ -1988,9 +2162,39 @@ def generate_4_week_schedule(start_week_id: int):
                         a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == eid, Assignment.date == d))
                         if a and a.value == "Set":
                             reserve.add(eid)
-                    if reserve:
-                        reserved_fd_by_date[d] = reserve
-                        _log(f"{d} FD reserve {[emp_name.get(i,'?') for i in sorted(reserve)]}")
+            if reserve:
+                reserved_fd_by_date[d] = reserve
+                _log(f"{d} FD reserve {[emp_name.get(i,'?') for i in sorted(reserve)]}")
+
+            # Maintenance: one agent per day if available
+            for d in daterange(wk.start_date, 7):
+                current_loop_date = d
+                candidates: list[int] = []
+                for eid in maint_emp_ids:
+                    a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == eid, Assignment.date == d))
+                    if not a or a.value != "Set":
+                        _log(f"{d} MA: drop {emp_name.get(eid,'?')} (assigned {a.value if a else 'None'})")
+                        continue
+                    if has_any_timeoff(emp_name.get(eid, ''), d, s):
+                        _log(f"{d} MA: drop {emp_name.get(eid,'?')} (time off request)")
+                        _mark_dismissed(eid, d)
+                        continue
+                    if not _is_available(eid, "Maintenance", "8AM–4:30PM", d, avail_idx):
+                        _log(f"{d} MA: drop {emp_name.get(eid,'?')} (not available)")
+                        continue
+                    if not rest_ok(eid, d, "Maintenance", "8AM–4:30PM"):
+                        _log(f"{d} MA: drop {emp_name.get(eid,'?')} (rest rule)")
+                        continue
+                    candidates.append(eid)
+                pick = pick_best(candidates, "Maintenance", "8AM–4:30PM")
+                if pick is None:
+                    continue
+                a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == pick, Assignment.date == d))
+                if a:
+                    a.value = "8AM–4:30PM"
+                    assigned_counts[pick] += 1
+                    last_token_per_role[(pick, "Maintenance")] = _pref_token("Maintenance", "8AM–4:30PM")
+                    _log(f"{d} MA assign 8AM–4:30PM -> {emp_name.get(pick,'?')}")
 
             # Breakfast Bar: one per 5/6/7am per day if available (after FD; skip reserved FD candidates and prefer non-FD when FD is missing)
             for d in daterange(wk.start_date, 7):
@@ -2242,8 +2446,9 @@ def export_schedule_excel(week_id: int):
         
         # Define employee row mappings based on template structure
         # Front Desk: rows 5-22 (names in column D)
-        # Shuttle: rows 24-35 (names in column D) 
+        # Shuttle: rows 24-35 (names in column D)
         # Breakfast Bar: rows 37-42 (names in column D)
+        # Maintenance: starts at the row whose column A label is "Maintenance"
         
         # Create mapping of employee names to their row numbers
         employee_rows = {}
@@ -2288,6 +2493,24 @@ def export_schedule_excel(week_id: int):
             primary = _primary_name_from_cell(name_cell.value)
             if primary:
                 employee_rows[primary] = {"row": row, "section": "Breakfast Bar"}
+
+        # Maintenance employees (dynamic range following "Maintenance" header)
+        maint_start_row: Optional[int] = None
+        for row in range(1, ws.max_row + 1):
+            label = ws[f'A{row}'].value
+            if isinstance(label, str) and label.strip().lower() == "maintenance":
+                maint_start_row = row
+                break
+        if maint_start_row:
+            for row in range(maint_start_row, ws.max_row + 1):
+                next_label = ws[f'A{row}'].value
+                if row != maint_start_row and isinstance(next_label, str) and next_label.strip():
+                    # Reached the next labeled section such as "Manager"; stop capturing Maintenance names
+                    break
+                name_cell = ws[f'D{row}']
+                primary = _primary_name_from_cell(name_cell.value)
+                if primary:
+                    employee_rows[primary] = {"row": row, "section": "Maintenance"}
         
         # Build map of employee -> primary section name (for cross-role tagging)
         emp_primary: dict[str, str] = {}
@@ -2306,9 +2529,11 @@ def export_schedule_excel(week_id: int):
                 return "Breakfast Bar"
             if value in SHUTTLE_SHIFTS:
                 return "Shuttle"
+            if value in MAINTENANCE_SHIFTS:
+                return "Maintenance"
             return None
 
-        role_abbrev = {"Front Desk": "FD", "Breakfast Bar": "BB", "Shuttle": "SH"}
+        role_abbrev = {"Front Desk": "FD", "Breakfast Bar": "BB", "Shuttle": "SH", "Maintenance": "MA"}
 
         # Fill in the shift data
         import re
@@ -2333,7 +2558,7 @@ def export_schedule_excel(week_id: int):
         # Maps of employee -> set of date ISO strings
         vacation_days = ctx.get("vacation_days", {})
         dismissed_days = ctx.get("dismissed_days", {})
-        for section_name in ["Breakfast Bar", "Front Desk", "Shuttle"]:
+        for section_name in ["Breakfast Bar", "Front Desk", "Shuttle", "Maintenance"]:
             if section_name not in sections:
                 continue
                 

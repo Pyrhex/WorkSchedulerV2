@@ -175,6 +175,52 @@
           {% endfor %}
         </div>
       </div>
+
+      {% if maintenance %}
+      <div class="table-card">
+        <div class="table-title">Maintenance</div>
+        <div class="schedule-table" role="table" aria-label="Maintenance">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Employees</div>
+            {% for d in week.dates %}
+              <div class="cell head {% if maintenance_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          {% for emp in maintenance.employees %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ emp }}</div>
+              {% for d in week.dates %}
+                {% set val = maintenance.assignments[emp][d.key] %}
+                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
+                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
+                {% set sel_cls =
+                  'select-yellow' if val == 'TIME OFF' else (
+                  'select-green' if val == '8AM–4:30PM' else (
+                  'select-gray' if val == 'Set' else ''))
+                %}
+                <div class="cell" role="cell" data-section="Maintenance" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                    {% for opt in maintenance.shifts %}
+                      {% if opt == 'TIME OFF' %}
+                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                      {% else %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
+                      {% endif %}
+                    {% endfor %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+          {% if maintenance.employees|length == 0 %}
+            <div class="row" role="row">
+              <div class="cell" style="grid-column: 1 / span {{ week.dates|length + 1 }}; color:#64748b; padding:12px;">No maintenance employees yet.</div>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
     </section>
   </div>
 {% endblock %}
