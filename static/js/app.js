@@ -1,3 +1,20 @@
+const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
+
+function ensureTimeOffOptions(selectEl) {
+  if (![...selectEl.options].some(o => o.value === 'TIME OFF')) {
+    const opt = document.createElement('option');
+    opt.value = 'TIME OFF';
+    opt.textContent = 'REQ OFF';
+    selectEl.insertBefore(opt, selectEl.firstChild);
+  }
+  if (![...selectEl.options].some(o => o.value === 'REQ VAC')) {
+    const opt = document.createElement('option');
+    opt.value = 'REQ VAC';
+    opt.textContent = 'REQ VAC';
+    selectEl.insertBefore(opt, selectEl.firstChild);
+  }
+}
+
 function showToast(msg) {
   const el = document.getElementById('toast');
   if (!el) return;
@@ -8,7 +25,7 @@ function showToast(msg) {
 
 function selectClassForValue(section, value) {
   if (!value || value === 'Set') return 'select-gray';
-  if (value === 'TIME OFF') return 'select-yellow';
+  if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
   if (section === 'Breakfast Bar') {
     if (value === '5AM–12PM') return 'select-green';
     if (value === '6AM–12PM') return 'select-blue';
@@ -137,7 +154,7 @@ function updateConflictsUI() {
     if (!emp || !dk) return;
     const sel = cell.querySelector('select');
     const val = sel ? sel.value : null;
-    const active = !!val && val !== 'Set' && val !== 'TIME OFF';
+    const active = !!val && val !== 'Set' && !TIME_OFF_VALUES.has(val);
     const key = emp + '||' + dk;
     if (!groups[key]) groups[key] = [];
     groups[key].push({ cell: cell, active: active });
@@ -169,7 +186,9 @@ function wireShiftSelects() {
         if (!data.ok) {
           if (data.code === 'timeoff') {
             // Force TIME OFF but keep dropdown enabled so user can change
-            sel.value = data.value || 'TIME OFF';
+            ensureTimeOffOptions(sel);
+            const desired = TIME_OFF_VALUES.has(data.value) ? data.value : 'TIME OFF';
+            sel.value = desired;
             updateSelectClass(sel, section, sel.value);
             updateCoverageUI(data);
             updateConflictsUI();
@@ -227,18 +246,12 @@ function wireTimeOff() {
           const d = new Date(dk);
           if (d >= from && d <= to) {
             if (data.item.approved) {
-              // Ensure TIME OFF option exists, then set + disable
-              if (![...sel.options].some(o => o.value === 'TIME OFF')) {
-                const opt = document.createElement('option');
-                opt.value = 'TIME OFF';
-                opt.textContent = 'TIME OFF';
-                sel.insertBefore(opt, sel.firstChild);
-              }
-              sel.value = 'TIME OFF';
+              ensureTimeOffOptions(sel);
+              const desired = data.item.vacation ? 'REQ VAC' : 'TIME OFF';
+              sel.value = desired;
               updateSelectClass(sel, cell.getAttribute('data-section'), sel.value);
             } else {
-              // Re-enable and revert TIME OFF to Set
-              if (sel.value === 'TIME OFF') sel.value = 'Set';
+              if (TIME_OFF_VALUES.has(sel.value)) sel.value = 'Set';
               updateSelectClass(sel, cell.getAttribute('data-section'), sel.value);
             }
           }
@@ -291,6 +304,25 @@ function wireTimeOff() {
           });
           const data = await res.json();
           if (!data.ok) throw new Error(data.error || 'Failed');
+          const payload = data.item;
+          if (toggle.checked) {
+            const name = payload.name;
+            const from = new Date(payload.from);
+            const to = new Date(payload.to);
+            const selects = document.querySelectorAll(`.cell[data-employee="${name}"] select`);
+            selects.forEach(sel => {
+              const cell = sel.closest('.cell');
+              const dk = cell.getAttribute('data-date');
+              if (!dk) return;
+              const d = new Date(dk);
+              if (d >= from && d <= to && payload.approved) {
+                ensureTimeOffOptions(sel);
+                sel.value = payload.vacation ? 'REQ VAC' : 'TIME OFF';
+                updateSelectClass(sel, cell.getAttribute('data-section'), sel.value);
+              }
+            });
+            updateConflictsUI();
+          }
           showToast('Vacation updated');
         } catch (err) {
           console.error(err);
@@ -303,7 +335,7 @@ function wireTimeOff() {
   });
 }
 
-function applyTimeOffUIUpdate(name, fromIso, toIso, approved) {
+function applyTimeOffUIUpdate(name, fromIso, toIso, approved, vacation) {
   if (!name || !fromIso || !toIso) return;
   const from = new Date(fromIso);
   const to = new Date(toIso);
@@ -315,16 +347,10 @@ function applyTimeOffUIUpdate(name, fromIso, toIso, approved) {
     const d = new Date(dk);
     if (d >= from && d <= to) {
       if (approved) {
-        // Ensure TIME OFF option exists, then set
-        if (![...sel.options].some(o => o.value === 'TIME OFF')) {
-          const opt = document.createElement('option');
-          opt.value = 'TIME OFF';
-          opt.textContent = 'TIME OFF';
-          sel.insertBefore(opt, sel.firstChild);
-        }
-        sel.value = 'TIME OFF';
+        ensureTimeOffOptions(sel);
+        sel.value = vacation ? 'REQ VAC' : 'TIME OFF';
       } else {
-        if (sel.value === 'TIME OFF') sel.value = 'Set';
+        if (TIME_OFF_VALUES.has(sel.value)) sel.value = 'Set';
       }
       updateSelectClass(sel, cell.getAttribute('data-section'), sel.value);
     }
@@ -341,7 +367,7 @@ function initLiveUpdates() {
       if (payload?.type === 'timeoff' && payload?.item) {
         const it = payload.item;
         // Update UI for affected employee/date range
-        applyTimeOffUIUpdate(it.name, it.from, it.to, !!it.approved);
+        applyTimeOffUIUpdate(it.name, it.from, it.to, !!it.approved, !!it.vacation);
         // Update coverage UI if included
         if (payload.counts) {
           updateCoverageUI(payload);

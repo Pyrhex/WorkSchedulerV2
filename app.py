@@ -204,6 +204,9 @@ def format_four_week_label(start: date, end: date) -> str:
 
 
 TIME_OFF_LABEL = "TIME OFF"
+REQ_VAC_LABEL = "REQ VAC"
+TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
+NEUTRAL_ASSIGNMENT_VALUES = {"Set"} | TIME_OFF_VALUES
 
 
 UNDO_DELETE_SECONDS = 20
@@ -226,6 +229,7 @@ SENIORITY_ORDER = [
 BREAKFAST_SHIFTS = [
     "Set",
     TIME_OFF_LABEL,
+    REQ_VAC_LABEL,
     "5AM–12PM",
     "6AM–12PM",
     "7AM–12PM",
@@ -235,6 +239,7 @@ BREAKFAST_SHIFTS = [
 FRONT_DESK_SHIFTS = [
     "Set",
     TIME_OFF_LABEL,
+    REQ_VAC_LABEL,
     "AM (6:00AM–2:00PM)",
     "AM (6:15AM–2:15PM)",
     "PM (2:00PM–10:00PM)",
@@ -247,6 +252,7 @@ FRONT_DESK_SHIFTS = [
 SHUTTLE_SHIFTS = [
     "Set",
     TIME_OFF_LABEL,
+    REQ_VAC_LABEL,
     "AM (3:30AM–11:30AM)",
     "Midday (10:30AM–6:30PM)",
     "PM (5:30PM–1:30AM)",
@@ -256,6 +262,7 @@ SHUTTLE_SHIFTS = [
 MAINTENANCE_SHIFTS = [
     "Set",
     TIME_OFF_LABEL,
+    REQ_VAC_LABEL,
     "8AM–4:30PM",
 ]
 
@@ -433,6 +440,7 @@ def _update_assignments_for_timeoff(
     start: date,
     end: date,
     approved: bool,
+    timeoff: Optional[TimeOff] = None,
     exclude_id: Optional[int] = None,
 ) -> None:
     """Apply the time-off approval state to existing assignments across all weeks."""
@@ -447,12 +455,13 @@ def _update_assignments_for_timeoff(
     )
     for assignment in assignments:
         if approved:
-            if assignment.value != TIME_OFF_LABEL:
-                assignment.value = TIME_OFF_LABEL
+            desired = REQ_VAC_LABEL if timeoff and timeoff.vacation else TIME_OFF_LABEL
+            if assignment.value != desired:
+                assignment.value = desired
             if hasattr(Assignment, "dismissed_timeoff"):
                 assignment.dismissed_timeoff = 0
         else:
-            if assignment.value == TIME_OFF_LABEL and not has_approved_timeoff(employee.name, assignment.date, s, exclude_id):
+            if assignment.value in TIME_OFF_VALUES and not has_approved_timeoff(employee.name, assignment.date, s, exclude_id):
                 assignment.value = "Set"
                 if hasattr(Assignment, "dismissed_timeoff"):
                     assignment.dismissed_timeoff = 0
@@ -464,10 +473,22 @@ def sync_timeoff_to_assignments(week_id: int, s: Session):
     # For each employee and day, if approved time off, set TIME OFF label
     for emp in s.scalars(select(Employee)):
         for d in days:
-            if has_approved_timeoff(emp.name, d, s):
+            to_rec = s.scalar(
+                select(TimeOff)
+                .where(
+                    TimeOff.name == emp.name,
+                    TimeOff.approved.is_(True),
+                    TimeOff.from_date <= d,
+                    TimeOff.to_date >= d,
+                )
+                .order_by(TimeOff.vacation.desc(), TimeOff.to_date.desc(), TimeOff.id.desc())
+            )
+            if to_rec:
                 a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == emp.id, Assignment.date == d))
-                if a and a.value != TIME_OFF_LABEL:
-                    a.value = TIME_OFF_LABEL
+                if a:
+                    desired = REQ_VAC_LABEL if to_rec.vacation else TIME_OFF_LABEL
+                    if a.value != desired:
+                        a.value = desired
     s.commit()
 
 
@@ -568,7 +589,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         rows = s.scalars(select(Assignment).where(Assignment.week_id == week_id))
 
         for a in rows:
-            if not a.value or a.value in ("Set", TIME_OFF_LABEL):
+            if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
 
             date_key = a.date.isoformat()
@@ -700,7 +721,7 @@ def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
                 continue
             for d in daterange(wk.start_date, 7):
                 a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
-                if not a or not a.value or a.value in ("Set", TIME_OFF_LABEL):
+                if not a or not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                     continue
                 active = 0
                 for sec_name in (emp_sections.get(eid) or set()):
@@ -793,7 +814,7 @@ def build_week_context(week_id: int):
                     for sec_name in emp_in_sections.get(nm, set()):
                         # Only count if the value belongs to that section's shift options and is not Set/OFF
                         val = sections[sec_name]["assignments"][nm][d["key"]]
-                        if val and val not in ("Set", TIME_OFF_LABEL) and val in section_shifts(sec_name):
+                        if val and val not in NEUTRAL_ASSIGNMENT_VALUES and val in section_shifts(sec_name):
                             active += 1
                     if active > 1:
                         double_booked[d["key"]].append(nm)
@@ -924,7 +945,7 @@ def index():
 @app.template_filter("fd_display")
 def fd_display(label: str) -> str:
     # For Front Desk shift labels like "AM (6:00AM–2:00PM)", show only the time range
-    if label in ("Set", TIME_OFF_LABEL):
+    if label in NEUTRAL_ASSIGNMENT_VALUES:
         return label
     if "(" in label and ")" in label:
         start = label.find("(") + 1
@@ -937,7 +958,7 @@ def fd_display(label: str) -> str:
 @app.template_filter("time_only")
 def time_only(label: str) -> str:
     # For labels like "Midday (10:30AM–6:30PM)", show only the time range
-    if label in ("Set", TIME_OFF_LABEL):
+    if label in NEUTRAL_ASSIGNMENT_VALUES:
         return label
     if "(" in label and ")" in label:
         start = label.find("(") + 1
@@ -954,7 +975,7 @@ def format_shift(label: str) -> str:
         return label
     if label.lower() == "set":
         return "-"
-    if label == TIME_OFF_LABEL:
+    if label in TIME_OFF_VALUES:
         return label
     # Prefer time-only inside parentheses if present
     if "(" in label and ")" in label:
@@ -1045,7 +1066,7 @@ def manager_meals(week_id: int):
         # Preload employee id -> name for efficiency
         emp_name = {e.id: e.name for e in s.scalars(select(Employee))}
         for a in rows:
-            if not a.value or a.value in ("Set", TIME_OFF_LABEL):
+            if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
             variant = _fd_variant(a.value)
             if not variant:
@@ -1111,7 +1132,7 @@ def manager_meals_text(week_id: int):
         rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
         emp_name = {e.id: e.name for e in s.scalars(select(Employee))}
         for a in rows:
-            if not a.value or a.value in ("Set", TIME_OFF_LABEL):
+            if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
             variant = _fd_variant(a.value)
             if not variant:
@@ -1430,13 +1451,13 @@ def delete_employee(eid: int):
 
 def role_shift_variants(role_name: str) -> list[str]:
     if role_name == "Breakfast Bar":
-        return [s for s in BREAKFAST_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
+        return [s for s in BREAKFAST_SHIFTS if s not in NEUTRAL_ASSIGNMENT_VALUES]
     if role_name == "Front Desk":
-        return [s for s in FRONT_DESK_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
+        return [s for s in FRONT_DESK_SHIFTS if s not in NEUTRAL_ASSIGNMENT_VALUES]
     if role_name == "Shuttle":
-        return [s for s in SHUTTLE_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
+        return [s for s in SHUTTLE_SHIFTS if s not in NEUTRAL_ASSIGNMENT_VALUES]
     if role_name == "Maintenance":
-        return [s for s in MAINTENANCE_SHIFTS if s not in ("Set", TIME_OFF_LABEL)]
+        return [s for s in MAINTENANCE_SHIFTS if s not in NEUTRAL_ASSIGNMENT_VALUES]
     return []
 
 
@@ -1583,6 +1604,7 @@ def timeoff_new():
                 start=from_d,
                 end=to_d,
                 approved=True,
+                timeoff=rec,
             )
         s.commit()
         if approved:
@@ -1734,9 +1756,9 @@ def assign():
         # If there is approved time off on this date, allow manual override:
         # - When user selects a non-time-off value, record it and mark dismissed_timeoff=1
         #   to indicate a scheduled override despite approved time off.
-        # - When user selects TIME OFF explicitly, set it and clear dismissed flag.
+        # - When user selects a time-off value (TIME OFF or REQ VAC), set it and clear the flag.
         if has_approved_timeoff(emp.name, dte, s):
-            if value and value != TIME_OFF_LABEL:
+            if value and value not in TIME_OFF_VALUES:
                 # Allow override with explicit shift
                 a.value = value
                 try:
@@ -1745,8 +1767,8 @@ def assign():
                 except Exception:
                     pass
             else:
-                # Explicit TIME OFF selection
-                a.value = TIME_OFF_LABEL
+                # Explicit time-off selection
+                a.value = value if value in TIME_OFF_VALUES else TIME_OFF_LABEL
                 try:
                     a.dismissed_timeoff = False  # type: ignore[attr-defined]
                 except Exception:
@@ -1819,6 +1841,7 @@ def delete_timeoff(tid):
                 start=to.from_date,
                 end=to.to_date,
                 approved=False,
+                timeoff=to,
                 exclude_id=to.id,
             )
 
@@ -1911,6 +1934,7 @@ def toggle_timeoff():
             start=to.from_date,
             end=to.to_date,
             approved=approved,
+            timeoff=to,
             exclude_id=None if approved else to.id,
         )
         s.commit()
@@ -1956,6 +1980,7 @@ def toggle_timeoff():
             "from": to.from_date.isoformat(),
             "to": to.to_date.isoformat(),
             "approved": to.approved,
+            "vacation": bool(getattr(to, "vacation", False)),
         }
         # Broadcast to live listeners
         _broadcast({
@@ -2012,18 +2037,77 @@ def toggle_timeoff_vacation():
         if not to:
             return jsonify({"ok": False, "error": "Not found"}), 404
         to.vacation = vacation
+        emp = s.scalar(select(Employee).where(Employee.name == to.name))
+        if to.approved:
+            _update_assignments_for_timeoff(
+                s,
+                employee=emp,
+                start=to.from_date,
+                end=to.to_date,
+                approved=True,
+                timeoff=to,
+            )
         s.commit()
+
+        response_item = {
+            "id": to.id,
+            "name": to.name,
+            "role": to.role,
+            "from": to.from_date.isoformat(),
+            "to": to.to_date.isoformat(),
+            "approved": bool(to.approved),
+            "vacation": bool(to.vacation),
+        }
+
+        week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
+        if week:
+            (
+                counts,
+                missing,
+                required,
+                variant_counts,
+                shuttle_missing,
+                shuttle_required,
+                shuttle_counts,
+                bb_missing,
+                bb_required,
+                bb_counts,
+                fd_duplicates,
+                maintenance_missing,
+                maintenance_required,
+                maintenance_counts,
+            ) = coverage_snapshot_db(week.id)
+            payload = {
+                "type": "timeoff",
+                "op": "vacation",
+                "item": response_item,
+                "counts": counts,
+                "missing": missing,
+                "required": required,
+                "variant_counts": variant_counts,
+                "shuttle_missing": shuttle_missing,
+                "shuttle_required": shuttle_required,
+                "shuttle_counts": shuttle_counts,
+                "bb_missing": bb_missing,
+                "bb_required": bb_required,
+                "bb_counts": bb_counts,
+                "fd_duplicates": fd_duplicates,
+                "maintenance_missing": maintenance_missing,
+                "maintenance_required": maintenance_required,
+                "maintenance_counts": maintenance_counts,
+                "double_booked": double_booked_snapshot(week.id),
+            }
+        else:
+            payload = {
+                "type": "timeoff",
+                "op": "vacation",
+                "item": response_item,
+            }
+        _broadcast(payload)
+
         return jsonify({
             "ok": True,
-            "item": {
-                "id": to.id,
-                "name": to.name,
-                "role": to.role,
-                "from": to.from_date.isoformat(),
-                "to": to.to_date.isoformat(),
-                "approved": bool(to.approved),
-                "vacation": bool(to.vacation),
-            }
+            "item": response_item,
         })
 
 
@@ -2354,7 +2438,7 @@ def generate_4_week_schedule(start_week_id: int):
                 # Apply simple rest constraints across consecutive days, even over week boundaries
                 prev_date = dte - timedelta(days=1)
                 a_prev = s.scalar(select(Assignment).where(Assignment.employee_id == eid, Assignment.date == prev_date))
-                if not a_prev or not a_prev.value or a_prev.value in ("Set", TIME_OFF_LABEL):
+                if not a_prev or not a_prev.value or a_prev.value in NEUTRAL_ASSIGNMENT_VALUES:
                     return True
                 # No AM after a previous-day PM (short 8h rest)
                 if role == "Front Desk" and label.startswith("AM") and a_prev.value.startswith("PM"):
@@ -2493,7 +2577,7 @@ def generate_4_week_schedule(start_week_id: int):
                 fd_counts = {"AM": 0, "PM": 0, "Audit": 0}
                 for eid in fd_emp_ids:
                     a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == eid, Assignment.date == day))
-                    if not a or not a.value or a.value in ("Set", TIME_OFF_LABEL):
+                    if not a or not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                         continue
                     if a.value.startswith("AM"):
                         fd_counts["AM"] += 1
@@ -2510,7 +2594,7 @@ def generate_4_week_schedule(start_week_id: int):
                 fd_counts = {"AM": 0, "PM": 0, "Audit": 0}
                 for eid in fd_emp_ids:
                     a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == eid, Assignment.date == d))
-                    if not a or not a.value or a.value in ("Set", TIME_OFF_LABEL):
+                    if not a or not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                         continue
                     if a.value.startswith("AM"):
                         fd_counts["AM"] += 1
@@ -2974,7 +3058,7 @@ def export_schedule_excel(week_id: int):
 
         # Helpers to classify a raw assignment label into a section
         def shift_section_of(value: Optional[str]) -> Optional[str]:
-            if not value or value in ("Set", TIME_OFF_LABEL):
+            if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
                 return None
             if value in FRONT_DESK_SHIFTS:
                 return "Front Desk"
@@ -3031,11 +3115,13 @@ def export_schedule_excel(week_id: int):
                         shift_value = employee_assignments[date_key]
 
                         # For time-off, show as request type based on Vacation toggle
-                        if shift_value == TIME_OFF_LABEL:
-                            # Follow main schedule display: REQ VAC only when dismissed+vacation, else REQ OFF
+                        if shift_value in TIME_OFF_VALUES:
                             is_dismissed = date_key in (dismissed_days.get(employee_name, set()) or set())
                             is_vac = date_key in (vacation_days.get(employee_name, set()) or set())
-                            ws[f'{col_letter}{row_num}'] = "REQ VAC" if (is_dismissed and is_vac) else "REQ OFF"
+                            if shift_value == REQ_VAC_LABEL or (is_dismissed and is_vac):
+                                ws[f'{col_letter}{row_num}'] = "REQ VAC"
+                            else:
+                                ws[f'{col_letter}{row_num}'] = "REQ OFF"
                             continue
 
                         # Format shift display: time-only and normalized dash spacing
