@@ -30,6 +30,18 @@
                 <input type="date" name="to" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
               </label>
             </div>
+            <div style="display:flex; align-items:center; gap:16px; margin-top:4px; flex-wrap:wrap;">
+              <label class="switch" title="Mark as approved">
+                <input type="checkbox" name="approved" checked>
+                <span class="slider"></span>
+              </label>
+              <span class="toggle-label" style="font-size:12px; color:#475569;">Approved</span>
+              <label class="switch" title="Mark as vacation" style="margin-left:8px;">
+                <input type="checkbox" name="vacation">
+                <span class="slider"></span>
+              </label>
+              <span class="toggle-label" style="font-size:12px; color:#475569;">Vacation</span>
+            </div>
             <div style="display:flex; gap:8px;">
               <button class="btn primary" type="submit">Create</button>
             </div>

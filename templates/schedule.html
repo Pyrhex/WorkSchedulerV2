@@ -63,8 +63,8 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
                     {% for opt in breakfast.shifts %}
                       {% if opt == 'TIME OFF' %}
-                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
-                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
@@ -106,8 +106,8 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
                     {% for opt in front_desk.shifts %}
                       {% if opt == 'TIME OFF' %}
-                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
-                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
@@ -162,8 +162,8 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
                     {% for opt in shuttle.shifts %}
                       {% if opt == 'TIME OFF' %}
-                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
-                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
@@ -202,8 +202,8 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
                     {% for opt in maintenance.shifts %}
                       {% if opt == 'TIME OFF' %}
-                        <option value="{{ opt }}" {% if val == opt and (vac and dismissed) %}selected{% endif %}>REQ VAC</option>
-                        <option value="{{ opt }}" {% if val == opt and not (vac and dismissed) %}selected{% endif %}>REQ OFF</option>
+                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
