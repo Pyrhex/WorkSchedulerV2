@@ -400,15 +400,19 @@ def init_db_once():
             s.commit()
 
 
-def has_approved_timeoff(name: str, dte: date, s: Session) -> bool:
-    to = s.scalar(
-        select(TimeOff).where(
+def has_approved_timeoff(name: str, dte: date, s: Session, exclude_id: Optional[int] = None) -> bool:
+    stmt = (
+        select(TimeOff)
+        .where(
             TimeOff.name == name,
             TimeOff.approved.is_(True),
             TimeOff.from_date <= dte,
             TimeOff.to_date >= dte,
         )
     )
+    if exclude_id is not None:
+        stmt = stmt.where(TimeOff.id != exclude_id)
+    to = s.scalar(stmt)
     return to is not None
 
 def has_any_timeoff(name: str, dte: date, s: Session) -> bool:
@@ -420,6 +424,38 @@ def has_any_timeoff(name: str, dte: date, s: Session) -> bool:
         )
     )
     return to is not None
+
+
+def _update_assignments_for_timeoff(
+    s: Session,
+    *,
+    employee: Optional[Employee],
+    start: date,
+    end: date,
+    approved: bool,
+    exclude_id: Optional[int] = None,
+) -> None:
+    """Apply the time-off approval state to existing assignments across all weeks."""
+    if not employee:
+        return
+    assignments = s.scalars(
+        select(Assignment).where(
+            Assignment.employee_id == employee.id,
+            Assignment.date >= start,
+            Assignment.date <= end,
+        )
+    )
+    for assignment in assignments:
+        if approved:
+            if assignment.value != TIME_OFF_LABEL:
+                assignment.value = TIME_OFF_LABEL
+            if hasattr(Assignment, "dismissed_timeoff"):
+                assignment.dismissed_timeoff = 0
+        else:
+            if assignment.value == TIME_OFF_LABEL and not has_approved_timeoff(employee.name, assignment.date, s, exclude_id):
+                assignment.value = "Set"
+                if hasattr(Assignment, "dismissed_timeoff"):
+                    assignment.dismissed_timeoff = 0
 
 
 def sync_timeoff_to_assignments(week_id: int, s: Session):
@@ -1530,7 +1566,7 @@ def timeoff_new():
         role = s.get(Section, emp.section_id).name if emp else 'Unknown'
         rec = TimeOff(name=name, role=role, from_date=from_d, to_date=to_d, approved=approved, vacation=vacation)
         s.add(rec)
-        s.commit()
+        s.flush()
         timeoff_info = {
             "name": rec.name,
             "role": rec.role,
@@ -1541,14 +1577,17 @@ def timeoff_new():
         }
         # If approved, update assignments for current week and broadcast
         if approved:
+            _update_assignments_for_timeoff(
+                s,
+                employee=emp,
+                start=from_d,
+                end=to_d,
+                approved=True,
+            )
+        s.commit()
+        if approved:
             week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
-            if emp and week:
-                for d in daterange(week.start_date, 7):
-                    if from_d <= d <= to_d:
-                        a = s.scalar(select(Assignment).where(Assignment.week_id == week.id, Assignment.employee_id == emp.id, Assignment.date == d))
-                        if a:
-                            a.value = TIME_OFF_LABEL
-                s.commit()
+            if week:
                 (
                     counts,
                     missing,
@@ -1772,19 +1811,20 @@ def delete_timeoff(tid):
         week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
         
         # If it was approved, we need to update assignments back to "Set"
-        if to.approved and week:
+        if to.approved:
             emp = s.scalar(select(Employee).where(Employee.name == to.name))
-            if emp:
-                for d in daterange(week.start_date, 7):
-                    in_range = to.from_date <= d <= to.to_date
-                    if in_range:
-                        a = s.scalar(select(Assignment).where(Assignment.week_id == week.id, Assignment.employee_id == emp.id, Assignment.date == d))
-                        if a and a.value == TIME_OFF_LABEL:
-                            a.value = "Set"
-        
+            _update_assignments_for_timeoff(
+                s,
+                employee=emp,
+                start=to.from_date,
+                end=to.to_date,
+                approved=False,
+                exclude_id=to.id,
+            )
+
         s.delete(to)
         s.commit()
-        
+
         # Only update coverage if we have a valid week
         if week:
             (
@@ -1864,36 +1904,51 @@ def toggle_timeoff():
         if not to:
             return jsonify({"ok": False, "error": "Not found"}), 404
         to.approved = approved
-        # Update assignments for the current primary week only
-        week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
         emp = s.scalar(select(Employee).where(Employee.name == to.name))
-        if emp:
-            for d in daterange(week.start_date, 7):
-                in_range = to.from_date <= d <= to.to_date
-                a = s.scalar(select(Assignment).where(Assignment.week_id == week.id, Assignment.employee_id == emp.id, Assignment.date == d))
-                if not a:
-                    continue
-                if approved and in_range:
-                    a.value = TIME_OFF_LABEL
-                elif not approved and a.value == TIME_OFF_LABEL and in_range:
-                    a.value = "Set"
+        _update_assignments_for_timeoff(
+            s,
+            employee=emp,
+            start=to.from_date,
+            end=to.to_date,
+            approved=approved,
+            exclude_id=None if approved else to.id,
+        )
         s.commit()
-        (
-            counts,
-            missing,
-            required,
-            variant_counts,
-            shuttle_missing,
-            shuttle_required,
-            shuttle_counts,
-            bb_missing,
-            bb_required,
-            bb_counts,
-            fd_duplicates,
-            maintenance_missing,
-            maintenance_required,
-            maintenance_counts,
-        ) = coverage_snapshot_db(week.id)
+        week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
+        if week:
+            (
+                counts,
+                missing,
+                required,
+                variant_counts,
+                shuttle_missing,
+                shuttle_required,
+                shuttle_counts,
+                bb_missing,
+                bb_required,
+                bb_counts,
+                fd_duplicates,
+                maintenance_missing,
+                maintenance_required,
+                maintenance_counts,
+            ) = coverage_snapshot_db(week.id)
+            double_booked = double_booked_snapshot(week.id)
+        else:
+            counts = {}
+            missing = {}
+            required = 0
+            variant_counts = {}
+            shuttle_missing = {}
+            shuttle_required = 0
+            shuttle_counts = {}
+            bb_missing = {}
+            bb_required = 0
+            bb_counts = {}
+            fd_duplicates = {}
+            maintenance_missing = {}
+            maintenance_required = 0
+            maintenance_counts = {}
+            double_booked = {}
         item = {
             "id": to.id,
             "name": to.name,
@@ -1924,7 +1979,7 @@ def toggle_timeoff():
             "maintenance_missing": maintenance_missing,
             "maintenance_required": maintenance_required,
             "maintenance_counts": maintenance_counts,
-            "double_booked": double_booked_snapshot(week.id),
+            "double_booked": double_booked,
         })
     return jsonify({
         "ok": True,
@@ -1943,7 +1998,7 @@ def toggle_timeoff():
         "maintenance_missing": maintenance_missing,
         "maintenance_required": maintenance_required,
         "maintenance_counts": maintenance_counts,
-        "double_booked": double_booked_snapshot(week.id),
+        "double_booked": double_booked,
     })
 
 
