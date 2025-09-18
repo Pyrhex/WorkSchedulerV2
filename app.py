@@ -205,6 +205,7 @@ def format_four_week_label(start: date, end: date) -> str:
 
 TIME_OFF_LABEL = "TIME OFF"
 REQ_VAC_LABEL = "REQ VAC"
+SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
 TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
 NEUTRAL_ASSIGNMENT_VALUES = {"Set"} | TIME_OFF_VALUES
 
@@ -255,6 +256,7 @@ SHUTTLE_SHIFTS = [
     REQ_VAC_LABEL,
     "AM (3:30AM–11:30AM)",
     "Midday (10:30AM–6:30PM)",
+    SHUTTLE_COMBO_LABEL,
     "PM (5:30PM–1:30AM)",
     "Crew (5:45PM–1:45AM)",
 ]
@@ -610,6 +612,9 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             if a.value in SHUTTLE_SHIFTS:
                 if a.value == "AM (3:30AM–11:30AM)":
                     sh_counts[date_key]["AM"] += 1
+                elif a.value == SHUTTLE_COMBO_LABEL:
+                    sh_counts[date_key]["Midday"] += 1
+                    sh_counts[date_key]["Crew"] += 1
                 elif a.value.startswith("Midday"):
                     sh_counts[date_key]["Midday"] += 1
                 elif a.value.startswith("PM (5:30PM"):
@@ -976,6 +981,8 @@ def format_shift(label: str) -> str:
     if label.lower() == "set":
         return "-"
     if label in TIME_OFF_VALUES:
+        return label
+    if label == SHUTTLE_COMBO_LABEL:
         return label
     # Prefer time-only inside parentheses if present
     if "(" in label and ")" in label:
@@ -1468,7 +1475,13 @@ def role_availability_variants(role_name: str) -> list[str]:
     if role_name == "Front Desk":
         return ["AM", "PM", "Audit"]
     if role_name == "Shuttle":
-        return ["AM (3:30AM–11:30AM)", "Midday (10:30AM–6:30PM)", "PM (5:30PM–1:30AM)", "Crew (5:45PM–1:45AM)"]
+        return [
+            "AM (3:30AM–11:30AM)",
+            "Midday (10:30AM–6:30PM)",
+            "PM (5:30PM–1:30AM)",
+            "Crew (5:45PM–1:45AM)",
+            SHUTTLE_COMBO_LABEL,
+        ]
     if role_name == "Maintenance":
         return ["8AM–4:30PM"]
     return []

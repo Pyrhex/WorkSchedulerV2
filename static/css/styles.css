@@ -171,6 +171,7 @@ body {
 .shift-select.select-gray  { background: #f6f6f6; border-color: #f1f4f8; color: #202020; }
 .shift-select.select-yellow{ background: #b45309; border-color: #92400e; color: #ffffff; }
 .shift-select.select-purple{ background: #7c3aed; border-color: #6d28d9; color: #ffffff; }
+.shift-select.select-orange{ background: #f97316; border-color: #ea580c; color: #ffffff; }
 
 /* Keep white text when disabled and slightly reduce intensity */
 .shift-select:disabled.select-green,
@@ -178,7 +179,8 @@ body {
 .shift-select:disabled.select-red,
 .shift-select:disabled.select-gray,
 .shift-select:disabled.select-yellow,
-.shift-select:disabled.select-purple { color: #ffffff; opacity: 0.9; }
+.shift-select:disabled.select-purple,
+.shift-select:disabled.select-orange { color: #ffffff; opacity: 0.9; }
 
 /* Availability compact table overrides */
 .availability .row { grid-template-columns: 160px auto; }

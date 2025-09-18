@@ -155,12 +155,13 @@
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls =
+                  'select-orange' if val == '10:30am - 6:30pm (c)' else (
                   'select-yellow' if val in ['TIME OFF', 'REQ VAC'] else (
                   'select-green' if val.startswith('AM') else (
                   'select-blue' if val.startswith('Midday') else (
                   'select-purple' if val.startswith('PM') else (
                   'select-red' if val.startswith('Crew') else (
-                  'select-gray' if val == 'Set' else '')))))
+                  'select-gray' if val == 'Set' else ''))))))
                 %}
                 <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
@@ -170,6 +171,8 @@
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% elif opt == 'REQ VAC' %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
+                      {% elif opt == '10:30am - 6:30pm (c)' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}

@@ -1,4 +1,5 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
+const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
 
 function ensureTimeOffOptions(selectEl) {
   if (![...selectEl.options].some(o => o.value === 'TIME OFF')) {
@@ -26,6 +27,7 @@ function showToast(msg) {
 function selectClassForValue(section, value) {
   if (!value || value === 'Set') return 'select-gray';
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
+  if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
   if (section === 'Breakfast Bar') {
     if (value === '5AM–12PM') return 'select-green';
     if (value === '6AM–12PM') return 'select-blue';
@@ -49,7 +51,7 @@ function selectClassForValue(section, value) {
 }
 
 function updateSelectClass(selectEl, section, value) {
-  selectEl.classList.remove('select-green', 'select-blue', 'select-red', 'select-gray', 'select-yellow', 'select-purple');
+  selectEl.classList.remove('select-green', 'select-blue', 'select-red', 'select-gray', 'select-yellow', 'select-purple', 'select-orange');
   const cls = selectClassForValue(section, value);
   if (cls) selectEl.classList.add(cls);
 }
