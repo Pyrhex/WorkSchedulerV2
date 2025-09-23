@@ -24,29 +24,21 @@ function showToast(msg) {
   setTimeout(() => el.classList.remove('show'), 1600);
 }
 
-function selectClassForValue(section, value) {
-  if (!value || value === 'Set') return 'select-gray';
+function selectClassForValue(_section, value) {
+  if (!value) return '';
+  if (value === 'Set') return 'select-gray';
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
   if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
-  if (section === 'Breakfast Bar') {
-    if (value === '5AM–12PM') return 'select-green';
-    if (value === '6AM–12PM') return 'select-blue';
-    if (value === '7AM–12PM') return 'select-purple';
-  }
-  if (section === 'Front Desk') {
-    if (value.startsWith('Audit')) return 'select-red';
-    if (value.startsWith('AM')) return 'select-green';
-    if (value.startsWith('PM')) return 'select-blue';
-  }
-  if (section === 'Shuttle') {
-    if (value.startsWith('AM')) return 'select-green';
-    if (value.startsWith('Midday')) return 'select-blue';
-    if (value.startsWith('PM')) return 'select-purple';
-    if (value.startsWith('Crew')) return 'select-red';
-  }
-  if (section === 'Maintenance') {
-    if (value === '8AM–4:30PM') return 'select-green';
-  }
+  if (value === '5AM–12PM') return 'select-green';
+  if (value === '6AM–12PM') return 'select-blue';
+  if (value === '7AM–12PM') return 'select-purple';
+  if (value.startsWith('Audit')) return 'select-red';
+  if (value.startsWith('Crew')) return 'select-red';
+  if (value.startsWith('Midday')) return 'select-blue';
+  if (value.startsWith('PM (2')) return 'select-blue';
+  if (value.startsWith('PM')) return 'select-purple';
+  if (value.startsWith('AM')) return 'select-green';
+  if (value === '8AM–4:30PM') return 'select-green';
   return '';
 }
 

@@ -50,18 +50,13 @@
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
                 {% set val = breakfast.assignments[emp][d.key] %}
+                {% set options = breakfast.employee_shifts.get(emp, breakfast.shifts) %}
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls =
-                  'select-green' if val == '5AM–12PM' else (
-                  'select-blue' if val == '6AM–12PM' else (
-                  'select-purple' if val == '7AM–12PM' else (
-                  'select-yellow' if val in ['TIME OFF', 'REQ VAC'] else (
-                  'select-gray' if val == 'Set' else ''))))
-                %}
+                {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
-                    {% for opt in breakfast.shifts %}
+                    {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
@@ -95,18 +90,13 @@
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
                 {% set val = front_desk.assignments[emp][d.key] %}
+                {% set options = front_desk.employee_shifts.get(emp, front_desk.shifts) %}
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls =
-                  'select-yellow' if val in ['TIME OFF', 'REQ VAC'] else (
-                  'select-red' if val.startswith('Audit') else (
-                  'select-green' if val.startswith('AM') else (
-                  'select-blue' if val.startswith('PM') else (
-                  'select-gray' if val == 'Set' else ''))))
-                %}
+                {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Front Desk" data-employee="{{ emp }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
-                    {% for opt in front_desk.shifts %}
+                    {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
@@ -152,20 +142,13 @@
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
                 {% set val = shuttle.assignments[emp][d.key] %}
+                {% set options = shuttle.employee_shifts.get(emp, shuttle.shifts) %}
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls =
-                  'select-orange' if val == '10:30am - 6:30pm (c)' else (
-                  'select-yellow' if val in ['TIME OFF', 'REQ VAC'] else (
-                  'select-green' if val.startswith('AM') else (
-                  'select-blue' if val.startswith('Midday') else (
-                  'select-purple' if val.startswith('PM') else (
-                  'select-red' if val.startswith('Crew') else (
-                  'select-gray' if val == 'Set' else ''))))))
-                %}
+                {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
-                    {% for opt in shuttle.shifts %}
+                    {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
@@ -200,16 +183,13 @@
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
                 {% set val = maintenance.assignments[emp][d.key] %}
+                {% set options = maintenance.employee_shifts.get(emp, maintenance.shifts) %}
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls =
-                  'select-yellow' if val in ['TIME OFF', 'REQ VAC'] else (
-                  'select-green' if val == '8AM–4:30PM' else (
-                  'select-gray' if val == 'Set' else ''))
-                %}
+                {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Maintenance" data-employee="{{ emp }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
-                    {% for opt in maintenance.shifts %}
+                    {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>

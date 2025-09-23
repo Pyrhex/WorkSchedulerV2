@@ -268,6 +268,15 @@ MAINTENANCE_SHIFTS = [
     "8AM–4:30PM",
 ]
 
+SECTION_SHIFT_MAP = {
+    "Breakfast Bar": BREAKFAST_SHIFTS,
+    "Front Desk": FRONT_DESK_SHIFTS,
+    "Shuttle": SHUTTLE_SHIFTS,
+    "Maintenance": MAINTENANCE_SHIFTS,
+}
+
+SECTION_DISPLAY_ORDER = ["Breakfast Bar", "Front Desk", "Shuttle", "Maintenance"]
+
 
 def next_sort_order_for_section(session: Session, section_id: int) -> int:
     max_order = session.scalar(select(func.max(Employee.sort_order)).where(Employee.section_id == section_id))
@@ -747,12 +756,52 @@ def build_week_context(week_id: int):
         dates = week_dates(week_start)
         week_keys = {d["key"] for d in dates}
         # Sections and employees
-        sections = {sec.name: {"employees": [], "assignments": {}, "shifts": []} for sec in s.scalars(select(Section))}
-        for sec_name in sections.keys():
-            # Include employees with this as primary role and any with this as a secondary role
-            sec_obj = s.scalar(select(Section).where(Section.name == sec_name))
-            if not sec_obj:
+        section_objs = list(s.scalars(select(Section)))
+        sections = {
+            sec.name: {
+                "employees": [],
+                "assignments": {},
+                "shifts": SECTION_SHIFT_MAP.get(sec.name, ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]),
+                "employee_shifts": {},
+            }
+            for sec in section_objs
+        }
+        sec_by_id = {sec.id: sec.name for sec in section_objs}
+
+        emp_primary_section: dict[int, str] = {}
+        emp_sections_map: dict[int, set[str]] = {}
+
+        for emp in s.scalars(select(Employee)):
+            primary_name = sec_by_id.get(emp.section_id)
+            if not primary_name:
                 continue
+            emp_primary_section[emp.id] = primary_name
+            emp_sections_map.setdefault(emp.id, set()).add(primary_name)
+
+        for er in s.scalars(select(EmployeeRole)):
+            sec_name = sec_by_id.get(er.section_id)
+            if not sec_name:
+                continue
+            emp_sections_map.setdefault(er.employee_id, set()).add(sec_name)
+
+        def ordered_sections_for(emp_id: int) -> List[str]:
+            available = emp_sections_map.get(emp_id) or set()
+            if not available:
+                return []
+            primary = emp_primary_section.get(emp_id)
+            ordered: List[str] = []
+            if primary and primary in available:
+                ordered.append(primary)
+            for name in SECTION_DISPLAY_ORDER:
+                if name in available and name != primary:
+                    ordered.append(name)
+            for name in available:
+                if name not in ordered:
+                    ordered.append(name)
+            return ordered
+
+        for sec_obj in section_objs:
+            sec_name = sec_obj.name
             primary_emps = list(
                 s.scalars(
                     select(Employee)
@@ -760,69 +809,19 @@ def build_week_context(week_id: int):
                     .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
                 )
             )
-            secondary_ids = [row[0] for row in s.execute(select(EmployeeRole.employee_id).where(EmployeeRole.section_id == sec_obj.id)).all()]
-            secondary_emps = (
-                list(
-                    s.scalars(
-                        select(Employee)
-                        .where(Employee.id.in_(secondary_ids))
-                        .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
-                    )
-                )
-                if secondary_ids
-                else []
-            )
-            primary_ids = {e.id for e in primary_emps}
-            # Append secondary employees after primaries, keep their insertion order, and avoid duplicates
-            emps = primary_emps + [e for e in secondary_emps if e.id not in primary_ids]
-            sections[sec_name]["employees"] = [e.name for e in emps]
-            # init assignment map
-            for e in emps:
-                sections[sec_name]["assignments"][e.name] = {d["key"]: "Set" for d in dates}
-            # fill from DB
-            for e in emps:
-                rows = s.scalars(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == e.id))
+            sections[sec_name]["employees"] = [e.name for e in primary_emps]
+
+            for emp in primary_emps:
+                sections[sec_name]["assignments"][emp.name] = {d["key"]: "Set" for d in dates}
+                section_order = ordered_sections_for(emp.id) or [sec_name]
+                sections[sec_name]["employee_shifts"][emp.name] = combined_shift_options(section_order)
+
+            for emp in primary_emps:
+                rows = s.scalars(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == emp.id))
                 for a in rows:
-                    sections[sec_name]["assignments"][e.name][a.date.isoformat()] = a.value
-            # shifts per section
-            if sec_name == "Breakfast Bar":
-                sections[sec_name]["shifts"] = BREAKFAST_SHIFTS
-            elif sec_name == "Front Desk":
-                sections[sec_name]["shifts"] = FRONT_DESK_SHIFTS
-            elif sec_name == "Shuttle":
-                sections[sec_name]["shifts"] = SHUTTLE_SHIFTS
-            elif sec_name == "Maintenance":
-                sections[sec_name]["shifts"] = MAINTENANCE_SHIFTS
+                    sections[sec_name]["assignments"][emp.name][a.date.isoformat()] = a.value
 
-        # Detect employees listed in multiple sections
-        emp_in_sections: dict[str, set[str]] = {}
-        for sec_name, sec in sections.items():
-            for nm in sec["employees"]:
-                emp_in_sections.setdefault(nm, set()).add(sec_name)
-        multi_role_names = {nm for nm, secset in emp_in_sections.items() if len(secset) > 1}
-
-        # Build double-booked map: date_key -> names who appear to have active shifts in 2+ sections the same day
-        def section_shifts(name: str) -> list[str]:
-            if name == "Breakfast Bar":
-                return BREAKFAST_SHIFTS
-            if name == "Front Desk":
-                return FRONT_DESK_SHIFTS
-            if name == "Shuttle":
-                return SHUTTLE_SHIFTS
-            return []
-
-        double_booked: dict[str, list[str]] = {d["key"]: [] for d in dates}
-        if multi_role_names:
-            for nm in multi_role_names:
-                for d in dates:
-                    active = 0
-                    for sec_name in emp_in_sections.get(nm, set()):
-                        # Only count if the value belongs to that section's shift options and is not Set/OFF
-                        val = sections[sec_name]["assignments"][nm][d["key"]]
-                        if val and val not in NEUTRAL_ASSIGNMENT_VALUES and val in section_shifts(sec_name):
-                            active += 1
-                    if active > 1:
-                        double_booked[d["key"]].append(nm)
+        double_booked = double_booked_snapshot(wk.id)
 
         # time off
         to_list = []
@@ -971,6 +970,70 @@ def time_only(label: str) -> str:
         if end > start:
             return label[start:end]
     return label
+
+
+def shift_css_class(label: Optional[str]) -> str:
+    if not label:
+        return ""
+    if label == "Set":
+        return "select-gray"
+    if label in TIME_OFF_VALUES:
+        return "select-yellow"
+    if label == "5AM–12PM":
+        return "select-green"
+    if label == "6AM–12PM":
+        return "select-blue"
+    if label == "7AM–12PM":
+        return "select-purple"
+    if label == SHUTTLE_COMBO_LABEL:
+        return "select-orange"
+    if label.startswith("Audit"):
+        return "select-red"
+    if label.startswith("Crew"):
+        return "select-red"
+    if label.startswith("Midday"):
+        return "select-blue"
+    if label.startswith("PM (2"):
+        return "select-blue"
+    if label.startswith("PM"):
+        return "select-purple"
+    if label.startswith("AM"):
+        return "select-green"
+    if label == "8AM–4:30PM":
+        return "select-green"
+    return ""
+
+
+@app.template_filter("shift_class")
+def shift_class_filter(label: str) -> str:
+    return shift_css_class(label)
+
+
+def combined_shift_options(section_names: Iterable[str]) -> List[str]:
+    ordered_sections = list(section_names)
+    if not ordered_sections:
+        return ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]
+
+    seen: set[str] = set()
+    options: list[str] = []
+
+    def _add(label: str) -> None:
+        if label not in seen:
+            options.append(label)
+            seen.add(label)
+
+    # Ensure neutral options appear first if any referenced section includes them
+    for neutral in ("Set", TIME_OFF_LABEL, REQ_VAC_LABEL):
+        if any(neutral in SECTION_SHIFT_MAP.get(sec, []) for sec in ordered_sections):
+            _add(neutral)
+
+    for sec in ordered_sections:
+        for label in SECTION_SHIFT_MAP.get(sec, []):
+            if label in ("Set", TIME_OFF_LABEL, REQ_VAC_LABEL):
+                continue
+            _add(label)
+
+    return options or ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]
 
 
 @app.template_filter("format_shift")
