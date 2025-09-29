@@ -3155,6 +3155,7 @@ def export_schedule_excel(week_id: int):
                 return ""
             if raw == "Set":
                 return "-"
+            original = raw
             # Prefer time-only inside parentheses if present
             if "(" in raw and ")" in raw:
                 start = raw.find("(") + 1
@@ -3166,6 +3167,9 @@ def export_schedule_excel(week_id: int):
             raw = re.sub(r"\s*-\s*", " - ", raw)
             # Lowercase AM/PM tokens (including attached to times)
             raw = re.sub(r"AM|PM", lambda m: m.group(0).lower(), raw)
+            # Specific display tweak for the combo shuttle shift requested by the team
+            if original.strip().lower() == SHUTTLE_COMBO_LABEL.lower():
+                return "10:30am - 6:30pm (c)"
             return raw
 
         # Maps of employee -> set of date ISO strings
