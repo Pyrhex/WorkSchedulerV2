@@ -203,6 +203,13 @@ def format_four_week_label(start: date, end: date) -> str:
     return f"{start_month} {start.day}, {start.year} – {end_month} {end.day}, {end.year}"
 
 
+def week_start_for_date(target: date) -> date:
+    """Find the stored week start corresponding to a calendar date."""
+    delta_days = (target - FOUR_WEEK_BASELINE).days
+    weeks_offset = delta_days // 7
+    return FOUR_WEEK_BASELINE + timedelta(days=weeks_offset * 7)
+
+
 TIME_OFF_LABEL = "TIME OFF"
 REQ_VAC_LABEL = "REQ VAC"
 SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
@@ -898,8 +905,12 @@ init_db_once()
 
 @app.route("/")
 def index():
+    today = date.today()
     with SessionLocal() as s:
-        week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
+        start = week_start_for_date(today)
+        week = s.scalar(select(Week).where(Week.start_date == start))
+        if not week:
+            week = _ensure_week_and_assignments(s, start)
         ctx = build_week_context(week.id)
     (
         counts,
