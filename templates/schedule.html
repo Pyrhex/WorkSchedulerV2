@@ -112,20 +112,6 @@
             </div>
           {% endfor %}
         </div>
-
-        <div class="coverage-notes">
-          <div class="missing-list" id="missing-list">
-            {% set miss_labels = [] %}
-            {% for d in week.dates %}
-              {% if missing[d.key] %}
-                {% set _ = miss_labels.append(d.label_short) %}
-              {% endif %}
-            {% endfor %}
-            {% if miss_labels %}
-              Missing coverage: {{ miss_labels | join(', ') }}
-            {% endif %}
-          </div>
-        </div>
       </div>
       
       <div class="table-card">
