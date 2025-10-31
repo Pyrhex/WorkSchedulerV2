@@ -24,6 +24,54 @@ function showToast(msg) {
   setTimeout(() => el.classList.remove('show'), 1600);
 }
 
+function applyThemePreference(isDark) {
+  const root = document.documentElement;
+  if (isDark) {
+    root.classList.add('dark-mode');
+  } else {
+    root.classList.remove('dark-mode');
+  }
+  if (document.body) {
+    document.body.classList.toggle('dark-mode', isDark);
+  }
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+  }
+}
+
+function initThemeToggle() {
+  const toggle = document.getElementById('theme-toggle');
+  if (!toggle) return;
+
+  let storedTheme = null;
+  try {
+    storedTheme = localStorage.getItem('theme');
+  } catch (err) {
+    storedTheme = null;
+  }
+
+  let isDark;
+  if (storedTheme === 'dark') {
+    isDark = true;
+  } else if (storedTheme === 'light') {
+    isDark = false;
+  } else {
+    isDark = document.documentElement.classList.contains('dark-mode');
+  }
+  applyThemePreference(isDark);
+
+  toggle.addEventListener('click', () => {
+    const next = !document.documentElement.classList.contains('dark-mode');
+    applyThemePreference(next);
+    try {
+      localStorage.setItem('theme', next ? 'dark' : 'light');
+    } catch (err) {
+      /* localStorage may be unavailable; ignore */
+    }
+  });
+}
+
 function selectClassForValue(_section, value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
@@ -678,6 +726,7 @@ function wireEmployeeSecondaryRoles() {
 window.confirmGenerateSchedule = confirmGenerateSchedule;
 
 document.addEventListener('DOMContentLoaded', () => {
+  initThemeToggle();
   wireShiftSelects();
   wireTimeOff();
   initLiveUpdates();

@@ -4,17 +4,45 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Scheduling System</title>
+    <script>
+      (function () {
+        var shouldUseDark = false;
+        try {
+          var stored = localStorage.getItem("theme");
+          if (stored === "dark") {
+            shouldUseDark = true;
+          } else if (stored === null && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            shouldUseDark = true;
+          }
+        } catch (err) {
+          if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            shouldUseDark = true;
+          }
+        }
+        if (shouldUseDark) {
+          document.documentElement.classList.add("dark-mode");
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/static/css/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand"><a href="/" style="color:inherit;text-decoration:none;">Scheduling System</a></div>
-        <nav class="nav">
-          <a href="/admin/employees" class="{{ 'active' if request.path.startswith('/admin/employees') else '' }}">Employees</a>
-          <a href="/timeoff" class="{{ 'active' if request.path.startswith('/timeoff') else '' }}">Time Off</a>
-          <a href="/schedules" class="{{ 'active' if request.path.startswith('/schedules') else '' }}">Schedules</a>
-        </nav>
+        <div class="topbar-actions">
+          <nav class="nav">
+            <a href="/admin/employees" class="{{ 'active' if request.path.startswith('/admin/employees') else '' }}">Employees</a>
+            <a href="/timeoff" class="{{ 'active' if request.path.startswith('/timeoff') else '' }}">Time Off</a>
+            <a href="/schedules" class="{{ 'active' if request.path.startswith('/schedules') else '' }}">Schedules</a>
+          </nav>
+          <button type="button" id="theme-toggle" class="theme-toggle-btn" aria-pressed="false">
+            <span class="theme-toggle-track" aria-hidden="true">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+            <span class="theme-toggle-label">Dark mode</span>
+          </button>
+        </div>
       </div>
     </header>
 
