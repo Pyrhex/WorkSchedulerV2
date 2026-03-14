@@ -50,9 +50,11 @@
       {% block content %}{% endblock %}
     </main>
 
+    {% block sidebar_wrapper %}
     <aside class="sidebar" id="sidebar">
       {% block sidebar %}{% endblock %}
     </aside>
+    {% endblock %}
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 

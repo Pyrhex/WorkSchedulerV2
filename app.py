@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import time
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from random import choice, sample
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for, send_file, Response
-from flask import stream_with_context
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
 import requests
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, create_engine, func, select, update, delete
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, UniqueConstraint, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -138,6 +138,19 @@ class Assignment(Base):
     dismissed_timeoff: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class AircrewArrival(Base):
+    __tablename__ = "aircrew_arrivals"
+    __table_args__ = (
+        UniqueConstraint("week_id", "carrier", "date", name="uniq_aircrew_week_carrier_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_id: Mapped[int] = mapped_column(ForeignKey("weeks.id"))
+    carrier: Mapped[str] = mapped_column(String)
+    date: Mapped[date] = mapped_column(Date)
+    times: Mapped[str] = mapped_column(String, default="")
+
+
 class TimeOff(Base):
     __tablename__ = "timeoff"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -213,8 +226,15 @@ def week_start_for_date(target: date) -> date:
 TIME_OFF_LABEL = "TIME OFF"
 REQ_VAC_LABEL = "REQ VAC"
 SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
+SUGGESTED_CREW_REGEX = re.compile(r"^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$", re.IGNORECASE)
 TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
 NEUTRAL_ASSIGNMENT_VALUES = {"Set"} | TIME_OFF_VALUES
+
+
+def is_suggested_crew_label(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return SUGGESTED_CREW_REGEX.match(value.strip()) is not None
 
 
 UNDO_DELETE_SECONDS = 20
@@ -284,6 +304,114 @@ SECTION_SHIFT_MAP = {
 
 SECTION_DISPLAY_ORDER = ["Breakfast Bar", "Front Desk", "Shuttle", "Maintenance"]
 
+AIRCREW_CARRIERS = ("Aeromexico", "Skywest")
+
+
+def _normalize_aircrew_time(value: str) -> str:
+    token = (value or "").strip().upper()
+    if not token:
+        raise ValueError("Empty time")
+    token = token.replace(" ", "")
+    token = token.replace(".", "")
+    token = token.replace("–", "-")
+    match = re.fullmatch(r"(\d{1,2}):?(\d{2})(AM|PM)?", token)
+    if not match:
+        raise ValueError(f"Invalid time format: {value}")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        raise ValueError("Out of range time")
+    suffix = match.group(3)
+    if suffix:
+        if hour > 12 or hour == 0:
+            raise ValueError("Invalid 12-hour time")
+        if hour == 12:
+            hour = 0
+        if suffix == "PM":
+            hour += 12
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _deserialize_aircrew_times(payload: Optional[str]) -> list[str]:
+    if not payload:
+        return []
+    cleaned: list[str] = []
+    def _append_normalized(value: str) -> None:
+        try:
+            cleaned.append(_normalize_aircrew_time(value))
+        except Exception:
+            pass
+
+    try:
+        data = json.loads(payload)
+        if isinstance(data, list):
+            for entry in data:
+                if entry is None:
+                    continue
+                _append_normalized(str(entry))
+            return sorted(set(cleaned))
+    except Exception:
+        pass
+
+    # Legacy plain-text entries such as "10:15PM / 12:15AM"
+    tokens = re.split(r"[,\n/]+", payload)
+    for token in tokens:
+        if token.strip():
+            _append_normalized(token)
+    return sorted(set(cleaned))
+
+
+def _serialize_aircrew_times(times: Iterable[str]) -> str:
+    unique = sorted({ _normalize_aircrew_time(t) for t in times if t is not None })
+    return json.dumps(unique)
+
+
+def _format_aircrew_time_display(value: str) -> str:
+    try:
+        hour, minute = map(int, value.split(":", 1))
+    except Exception:
+        return value
+    suffix = "am" if hour < 12 else "pm"
+    display_hour = hour % 12 or 12
+    return f"{display_hour}:{minute:02d}{suffix}"
+
+
+def _format_minutes_clock(total_minutes: int) -> str:
+    total_minutes = total_minutes % (24 * 60)
+    hour = total_minutes // 60
+    minute = total_minutes % 60
+    suffix = "am" if hour < 12 else "pm"
+    display_hour = hour % 12 or 12
+    return f"{display_hour}:{minute:02d}{suffix}"
+
+
+def _format_aircrew_shift_window(start_minutes: int, end_minutes: int) -> str:
+    start_label = _format_minutes_clock(start_minutes)
+    end_label = _format_minutes_clock(end_minutes)
+    return f"{start_label} - {end_label}"
+
+
+def _suggest_shuttle_shift(minutes: list[int]) -> Optional[str]:
+    if not minutes:
+        return None
+    ordered = sorted(minutes)
+    extended = ordered + [ordered[0] + 24 * 60]
+    max_gap = -1
+    gap_idx = 0
+    for idx in range(len(ordered)):
+        gap = extended[idx + 1] - extended[idx]
+        if gap > max_gap:
+            max_gap = gap
+            gap_idx = idx
+    start_total = extended[gap_idx + 1]
+    end_total = extended[gap_idx]
+    if end_total < start_total:
+        end_total += 24 * 60
+    buffer = 60
+    start_total = max(start_total - buffer, 0)
+    end_total = min(end_total + buffer, start_total + (18 * 60))
+    return _format_aircrew_shift_window(start_total, end_total)
+
 
 def next_sort_order_for_section(session: Session, section_id: int) -> int:
     max_order = session.scalar(select(func.max(Employee.sort_order)).where(Employee.section_id == section_id))
@@ -334,6 +462,19 @@ def init_db_once():
                 conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN max_shifts_per_week INTEGER")
             if "sort_order" not in cols:
                 conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN sort_order INTEGER")
+            # Create aircrew arrivals table if missing
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS aircrew_arrivals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    week_id INTEGER NOT NULL,
+                    carrier TEXT NOT NULL,
+                    date DATE NOT NULL,
+                    times TEXT DEFAULT '',
+                    UNIQUE(week_id, carrier, date)
+                )
+                """
+            )
             # Create employee_roles table if missing
             conn.exec_driver_sql(
                 """
@@ -624,19 +765,22 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                     counts[date_key]["Audit"] += 1
                     fd_label_counts[date_key]["Audit"][a.value] = fd_label_counts[date_key]["Audit"].get(a.value, 0) + 1
 
-            # Shuttle variants: count ONLY if the value is a Shuttle label
-            if a.value in SHUTTLE_SHIFTS:
-                if a.value == "AM (3:30AM–11:30AM)":
+            shuttle_value = a.value or ""
+            # Shuttle variants: include dynamic crew suggestions so coverage stays accurate
+            if shuttle_value in SHUTTLE_SHIFTS:
+                if shuttle_value == "AM (3:30AM–11:30AM)":
                     sh_counts[date_key]["AM"] += 1
-                elif a.value == SHUTTLE_COMBO_LABEL:
+                elif shuttle_value == SHUTTLE_COMBO_LABEL:
                     sh_counts[date_key]["Midday"] += 1
                     sh_counts[date_key]["Crew"] += 1
-                elif a.value.startswith("Midday"):
+                elif shuttle_value.startswith("Midday"):
                     sh_counts[date_key]["Midday"] += 1
-                elif a.value.startswith("PM (5:30PM"):
+                elif shuttle_value.startswith("PM (5:30PM"):
                     sh_counts[date_key]["PM"] += 1
-                elif a.value.startswith("Crew"):
+                elif shuttle_value.startswith("Crew"):
                     sh_counts[date_key]["Crew"] += 1
+            elif is_suggested_crew_label(shuttle_value):
+                sh_counts[date_key]["Crew"] += 1
 
             # Breakfast variants (exact labels)
             if a.value in bb_variants:
@@ -745,8 +889,11 @@ def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
                 if not a or not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                     continue
                 active = 0
+                val = a.value or ""
                 for sec_name in (emp_sections.get(eid) or set()):
                     if sec_name and a.value in section_shifts(sec_name):
+                        active += 1
+                    elif sec_name == "Shuttle" and is_suggested_crew_label(val):
                         active += 1
                 if active > 1:
                     key = d.isoformat()
@@ -830,6 +977,40 @@ def build_week_context(week_id: int):
 
         double_booked = double_booked_snapshot(wk.id)
 
+        # Aircrew arrivals: carriers and per-day times arrays
+        carriers_set = set(AIRCREW_CARRIERS)
+        aircrew_rows = list(s.scalars(select(AircrewArrival).where(AircrewArrival.week_id == week_id)))
+        for row in aircrew_rows:
+            if row.carrier:
+                carriers_set.add(row.carrier)
+        carriers = sorted(carriers_set)
+        arrivals: dict[str, dict[str, list[str]]] = {
+            carrier: {d["key"]: [] for d in dates} for carrier in carriers
+        }
+        for row in aircrew_rows:
+            carrier = row.carrier or ""
+            key = row.date.isoformat()
+            if carrier not in arrivals:
+                arrivals[carrier] = {d["key"]: [] for d in dates}
+                carriers.append(carrier)
+            if key in arrivals[carrier]:
+                arrivals[carrier][key] = _deserialize_aircrew_times(row.times)
+
+        shuttle_suggestions: dict[str, str] = {}
+        for d in dates:
+            key = d["key"]
+            all_minutes: list[int] = []
+            for carrier_map in arrivals.values():
+                for t in carrier_map.get(key, []):
+                    try:
+                        hour, minute = map(int, t.split(":", 1))
+                    except Exception:
+                        continue
+                    all_minutes.append(hour * 60 + minute)
+            suggestion = _suggest_shuttle_shift(all_minutes)
+            if suggestion:
+                shuttle_suggestions[key] = suggestion
+
         # time off
         to_list = []
         vacation_days: dict[str, set[str]] = {}
@@ -885,6 +1066,8 @@ def build_week_context(week_id: int):
             "week_id": week_id,
         }
 
+        carriers = sorted(arrivals.keys())
+
         return {
             "week": {"label": "Week 1", "dates": dates, "sections": sections},
             "breakfast": sections["Breakfast Bar"],
@@ -894,6 +1077,11 @@ def build_week_context(week_id: int):
             "vacation_days": vacation_days,
             "dismissed_days": dismissed_days,
             "double_booked": double_booked,
+            "aircrew": {
+                "carriers": carriers,
+                "arrivals": arrivals,
+            },
+            "shuttle_suggestions": shuttle_suggestions,
         }
 
 
@@ -936,6 +1124,8 @@ def index():
         front_desk=ctx["front_desk"],
         shuttle=ctx["week"]["sections"].get("Shuttle"),
         maintenance=ctx["week"]["sections"].get("Maintenance"),
+        aircrew=ctx.get("aircrew", {}),
+        shuttle_suggestions=ctx.get("shuttle_suggestions", {}),
         counts=counts,
         missing=missing,
         required=required,
@@ -1058,6 +1248,8 @@ def format_shift(label: str) -> str:
         return label
     if label == SHUTTLE_COMBO_LABEL:
         return label
+    if label.startswith("Crew Shift "):
+        label = label[len("Crew Shift "):]
     # Prefer time-only inside parentheses if present
     if "(" in label and ")" in label:
         start = label.find("(") + 1
@@ -1071,6 +1263,13 @@ def format_shift(label: str) -> str:
     # Lowercase AM/PM tokens (handles attached forms like 6:00AM)
     label = re.sub(r"AM|PM", lambda m: m.group(0).lower(), label)
     return label
+
+
+@app.template_filter("aircrew_time")
+def aircrew_time_filter(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return _format_aircrew_time_display(value)
 
 
 @app.route("/week/<int:week_id>")
@@ -1100,6 +1299,8 @@ def view_week(week_id: int):
         front_desk=ctx["front_desk"],
         shuttle=ctx["week"]["sections"].get("Shuttle"),
         maintenance=ctx["week"]["sections"].get("Maintenance"),
+        aircrew=ctx.get("aircrew", {}),
+        shuttle_suggestions=ctx.get("shuttle_suggestions", {}),
         counts=counts,
         missing=missing,
         required=required,
@@ -1909,6 +2110,90 @@ def assign():
     return jsonify(response_payload)
 
 
+@app.route("/aircrew/arrival", methods=["POST"])
+def upsert_aircrew_arrival():
+    data = request.get_json(force=True)
+    carrier = (data.get("carrier") or "").strip()
+    date_key = (data.get("date") or "").strip()
+    action = (data.get("action") or "add").strip().lower()
+    time_value = data.get("time")
+    week_id = data.get("week_id")
+    try:
+        week_id = int(week_id)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid week id"}), 400
+    if not carrier:
+        return jsonify({"ok": False, "error": "Carrier is required"}), 400
+    if not date_key:
+        return jsonify({"ok": False, "error": "Date is required"}), 400
+    try:
+        y, m, d = map(int, date_key.split("-"))
+        dte = date(y, m, d)
+    except Exception:
+        return jsonify({"ok": False, "error": "Bad date"}), 400
+
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return jsonify({"ok": False, "error": "Week not found"}), 404
+        week_end = week.start_date + timedelta(days=6)
+        if dte < week.start_date or dte > week_end:
+            return jsonify({"ok": False, "error": "Date outside of selected week"}), 400
+        response_cells: dict[str, list[str]] = {}
+
+        def load_row(target_date: date) -> tuple[Optional[AircrewArrival], list[str]]:
+            row = s.scalar(
+                select(AircrewArrival).where(
+                    AircrewArrival.week_id == week.id,
+                    AircrewArrival.carrier == carrier,
+                    AircrewArrival.date == target_date,
+                )
+            )
+            return row, _deserialize_aircrew_times(row.times if row else "")
+
+        def save_row(target_date: date, times_list: list[str], row: Optional[AircrewArrival]) -> None:
+            normalized = sorted({t for t in times_list})
+            if row and not normalized:
+                s.delete(row)
+                return
+            if not row and not normalized:
+                return
+            if not row:
+                row = AircrewArrival(week_id=week.id, carrier=carrier, date=target_date, times="[]")
+                s.add(row)
+            row.times = _serialize_aircrew_times(normalized)
+
+        row, current_times = load_row(dte)
+        if action == "remove":
+            try:
+                to_remove = _normalize_aircrew_time(time_value or "")
+            except Exception:
+                return jsonify({"ok": False, "error": "Invalid time"}), 400
+            updated = [t for t in current_times if t != to_remove]
+            save_row(dte, updated, row)
+            response_cells[dte.isoformat()] = updated
+        else:
+            try:
+                to_add = _normalize_aircrew_time(time_value or "")
+            except Exception:
+                return jsonify({"ok": False, "error": "Invalid time"}), 400
+            if to_add not in current_times:
+                current_times.append(to_add)
+            save_row(dte, current_times, row)
+            response_cells[dte.isoformat()] = sorted(set(current_times))
+
+        s.commit()
+
+    batch = [{"carrier": carrier, "date": dk, "times": times, "week_id": week_id} for dk, times in response_cells.items()]
+    _broadcast({"type": "aircrew", "week_id": week_id, "batch": batch})
+    return jsonify({
+        "ok": True,
+        "carrier": carrier,
+        "week_id": week_id,
+        "cells": response_cells,
+    })
+
+
 @app.route("/timeoff/delete/<int:tid>", methods=["POST"])
 def delete_timeoff(tid):
     with SessionLocal() as s:
@@ -2329,7 +2614,6 @@ def _ensure_week_and_assignments(s: Session, start_d: date) -> Week:
 
 
 # ---- Simple SSE broadcaster for live updates ----
-import json
 from queue import Queue
 from threading import Lock
 
@@ -2536,10 +2820,12 @@ def generate_4_week_schedule(start_week_id: int):
                 # Shuttle rest rules
                 if role == "Shuttle":
                     # No AM after a previous-day late shift (PM or Crew ends after midnight)
-                    if label.startswith("AM") and (a_prev.value.startswith("PM") or a_prev.value.startswith("Crew")):
+                    prev_val = a_prev.value or ""
+                    prev_was_crew = prev_val.startswith("Crew") or is_suggested_crew_label(prev_val)
+                    if label.startswith("AM") and (prev_val.startswith("PM") or prev_was_crew):
                         return False
                     # Be cautious with Midday after Crew (only ~8h45m rest)
-                    if label.startswith("Midday") and a_prev.value.startswith("Crew"):
+                    if label.startswith("Midday") and prev_was_crew:
                         return False
                 return True
 
@@ -2696,9 +2982,9 @@ def generate_4_week_schedule(start_week_id: int):
                         a = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == eid, Assignment.date == d))
                         if a and a.value == "Set":
                             reserve.add(eid)
-            if reserve:
-                reserved_fd_by_date[d] = reserve
-                _log(f"{d} FD reserve {[emp_name.get(i,'?') for i in sorted(reserve)]}")
+                    if reserve:
+                        reserved_fd_by_date[d] = reserve
+                        _log(f"{d} FD reserve {[emp_name.get(i,'?') for i in sorted(reserve)]}")
 
             # Maintenance: one agent per day if available
             for d in daterange(wk.start_date, 7):

@@ -1,5 +1,6 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
+const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
 
 function ensureTimeOffOptions(selectEl) {
   if (![...selectEl.options].some(o => o.value === 'TIME OFF')) {
@@ -72,11 +73,16 @@ function initThemeToggle() {
   });
 }
 
+function isSuggestedCrewValue(value) {
+  return typeof value === 'string' && CREW_SUGGESTION_REGEX.test(value);
+}
+
 function selectClassForValue(_section, value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
   if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
+  if (isSuggestedCrewValue(value)) return 'select-red';
   if (value === '5AM–12PM') return 'select-green';
   if (value === '6AM–12PM') return 'select-blue';
   if (value === '7AM–12PM') return 'select-purple';
@@ -211,8 +217,152 @@ function updateConflictsUI() {
   });
 }
 
+function applySuggestionOptionState(sel, mode = 'selected') {
+  const options = sel ? sel.querySelectorAll('option[data-suggestion-label]') : null;
+  if (!options || !options.length) return;
+  options.forEach(opt => {
+    const label = opt.getAttribute('data-suggestion-label');
+    const plain = opt.getAttribute('data-suggestion-text') || label;
+    if (mode === 'menu') {
+      if (label) opt.textContent = label;
+    } else {
+      if (opt.selected) {
+        if (plain) opt.textContent = plain;
+      } else if (label) {
+        opt.textContent = label;
+      }
+    }
+  });
+}
+
+function minutesFromTimeStr(value) {
+  if (!value) return null;
+  const parts = value.split(':');
+  if (parts.length < 2) return null;
+  const hour = Number(parts[0]);
+  const minute = Number(parts[1]);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  return ((hour % 24) * 60) + minute;
+}
+
+function formatSuggestionClock(minutes) {
+  const total = ((minutes % (24 * 60)) + (24 * 60)) % (24 * 60);
+  const hour = Math.floor(total / 60);
+  const minute = total % 60;
+  const suffix = hour < 12 ? 'am' : 'pm';
+  const displayHour = (hour % 12) || 12;
+  const body = `${displayHour}:${String(minute).padStart(2, '0')}`;
+  return `${body}${suffix}`;
+}
+
+function formatSuggestionRange(startMinutes, endMinutes) {
+  const start = formatSuggestionClock(startMinutes);
+  const end = formatSuggestionClock(endMinutes);
+  return `${start} - ${end}`;
+}
+
+function computeShuttleSuggestion(dateKey) {
+  if (!dateKey) return '';
+  const cells = document.querySelectorAll(`.aircrew-table .cell[data-date="${dateKey}"]`);
+  const minutes = [];
+  cells.forEach(cell => {
+    let list = [];
+    try {
+      list = JSON.parse(cell.dataset.times || '[]');
+    } catch (e) {
+      list = [];
+    }
+    list.forEach(value => {
+      const mins = minutesFromTimeStr(value);
+      if (mins === null) return;
+      minutes.push(mins);
+    });
+  });
+  if (!minutes.length) return '';
+  const ordered = minutes.slice().sort((a, b) => a - b);
+  const extended = ordered.concat(ordered[0] + 24 * 60);
+  let maxGap = -1;
+  let gapIdx = 0;
+  for (let i = 0; i < ordered.length; i += 1) {
+    const gap = extended[i + 1] - extended[i];
+    if (gap > maxGap) {
+      maxGap = gap;
+      gapIdx = i;
+    }
+  }
+  let startTotal = extended[gapIdx + 1];
+  let endTotal = extended[gapIdx];
+  if (endTotal < startTotal) {
+    endTotal += 24 * 60;
+  }
+  const buffer = 60;
+  startTotal = Math.max(startTotal - buffer, 0);
+  endTotal = Math.min(endTotal + buffer, startTotal + (18 * 60));
+  return formatSuggestionRange(startTotal, endTotal);
+}
+
+function ensureShuttleSuggestionOption(sel, suggestion) {
+  if (!sel) return;
+  let opt = sel.querySelector('option[data-suggestion="1"]');
+  if (!suggestion) {
+    if (opt) {
+      const wasSelected = opt.selected;
+      opt.remove();
+      if (wasSelected) {
+        sel.selectedIndex = 0;
+      }
+    }
+    applySuggestionOptionState(sel, document.activeElement === sel ? 'menu' : 'selected');
+    return;
+  }
+  if (!opt) {
+    opt = document.createElement('option');
+    opt.setAttribute('data-suggestion', '1');
+    sel.appendChild(opt);
+  } else {
+    sel.appendChild(opt); // ensure last
+  }
+  opt.value = suggestion;
+  opt.setAttribute('data-suggestion-text', suggestion);
+  opt.setAttribute('data-suggestion-label', `${suggestion} (Suggested)`);
+  opt.textContent = document.activeElement === sel ? `${suggestion} (Suggested)` : suggestion;
+  applySuggestionOptionState(sel, document.activeElement === sel ? 'menu' : 'selected');
+}
+
+function updateShuttleSuggestionForDate(dateKey) {
+  if (!dateKey) return;
+  const suggestion = computeShuttleSuggestion(dateKey);
+  const shuttleCells = document.querySelectorAll(`.schedule-table[aria-label="Shuttle"] .cell[data-date="${dateKey}"]`);
+  shuttleCells.forEach(cell => {
+    const sel = cell.querySelector('select.shift-select');
+    ensureShuttleSuggestionOption(sel, suggestion);
+    if (suggestion) {
+      cell.setAttribute('data-suggestion', suggestion);
+    } else {
+      cell.removeAttribute('data-suggestion');
+    }
+  });
+}
+
+function initShuttleSuggestions() {
+  const dateKeys = new Set();
+  document.querySelectorAll('.schedule-table[aria-label="Shuttle"] .cell[data-date]').forEach(cell => {
+    const dk = cell.getAttribute('data-date');
+    if (dk) dateKeys.add(dk);
+    const sel = cell.querySelector('select.shift-select');
+    const suggestion = cell.getAttribute('data-suggestion');
+    if (suggestion) {
+      ensureShuttleSuggestionOption(sel, suggestion);
+    }
+  });
+  dateKeys.forEach(dk => updateShuttleSuggestionForDate(dk));
+}
+
 function wireShiftSelects() {
   document.querySelectorAll('.shift-select').forEach(sel => {
+    applySuggestionOptionState(sel, 'selected');
+    sel.addEventListener('focus', () => applySuggestionOptionState(sel, 'menu'));
+    sel.addEventListener('blur', () => applySuggestionOptionState(sel, 'selected'));
     sel.addEventListener('change', async (e) => {
       const cell = sel.closest('.cell');
       const section = cell.getAttribute('data-section');
@@ -243,10 +393,12 @@ function wireShiftSelects() {
         updateCoverageUI(data);
         updateConflictsUI();
         showToast('Saved');
+        applySuggestionOptionState(sel, 'selected');
       } catch (err) {
         console.error(err);
         const message = err && typeof err.message === 'string' && err.message.trim() ? err.message : 'Save failed';
         showToast(message);
+        applySuggestionOptionState(sel, 'selected');
       }
     });
   });
@@ -399,6 +551,292 @@ function applyTimeOffUIUpdate(name, fromIso, toIso, approved, vacation) {
   });
 }
 
+const AIRCREW_WHEEL_DEFAULT = { hour: '6', minute: '00', period: 'PM' };
+let aircrewWheel = null;
+
+function formatAircrewTimeLabel(value) {
+  if (!value) return '';
+  const [h, m] = value.split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return value;
+  const suffix = h < 12 ? 'am' : 'pm';
+  const displayHour = (h % 12) || 12;
+  return `${displayHour}:${String(m).padStart(2, '0')}${suffix}`;
+}
+
+function renderAircrewCell(cell, times) {
+  if (!cell) return;
+  const chipsWrap = cell.querySelector('.aircrew-chips');
+  if (!chipsWrap) return;
+  chipsWrap.innerHTML = '';
+  const list = Array.isArray(times) ? times : [];
+  list.forEach(time => {
+    const chip = document.createElement('span');
+    chip.className = 'aircrew-chip';
+    chip.setAttribute('data-time', time);
+    const label = document.createElement('span');
+    label.className = 'aircrew-chip-label';
+    label.textContent = formatAircrewTimeLabel(time);
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'aircrew-chip-remove';
+    removeBtn.setAttribute('aria-label', `Remove ${label.textContent}`);
+    removeBtn.textContent = '×';
+    chip.appendChild(label);
+    chip.appendChild(removeBtn);
+    chipsWrap.appendChild(chip);
+  });
+  cell.dataset.times = JSON.stringify(list);
+  cell.classList.toggle('empty', list.length === 0);
+}
+
+async function postAircrewUpdate(action, carrier, dateKey, extra = {}) {
+  if (!window.currentWeekId) {
+    throw new Error('Week not found');
+  }
+  const payload = {
+    carrier,
+    date: dateKey,
+    action,
+    week_id: window.currentWeekId,
+    ...extra,
+  };
+  const res = await fetch('/aircrew/arrival', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || 'Unable to update aircrew arrivals');
+  }
+  return data;
+}
+
+function applyAircrewCells(carrier, cells) {
+  if (!cells) return;
+  const updatedDates = new Set();
+  Object.entries(cells).forEach(([dateKey, times]) => {
+    const cell = document.querySelector(`.aircrew-table .cell[data-carrier="${carrier}"][data-date="${dateKey}"]`);
+    if (!cell) return;
+    renderAircrewCell(cell, Array.isArray(times) ? times : []);
+    updatedDates.add(dateKey);
+  });
+  updatedDates.forEach(updateShuttleSuggestionForDate);
+}
+
+function convertWheelSelectionTo24(selection) {
+  if (!selection) return '18:00';
+  let hour = Number(selection.hour);
+  if (Number.isNaN(hour) || hour < 1 || hour > 12) {
+    hour = Number(AIRCREW_WHEEL_DEFAULT.hour);
+  }
+  const minute = selection.minute || AIRCREW_WHEEL_DEFAULT.minute;
+  const period = (selection.period || AIRCREW_WHEEL_DEFAULT.period).toUpperCase();
+  if (period === 'AM') {
+    hour = hour === 12 ? 0 : hour;
+  } else if (period === 'PM') {
+    hour = hour === 12 ? 12 : hour + 12;
+  }
+  return `${String(hour).padStart(2, '0')}:${minute}`;
+}
+
+function initAircrewWheelPicker() {
+  const modal = document.getElementById('aircrew-wheel-modal');
+  if (!modal) return null;
+  const overlay = modal.querySelector('.aircrew-wheel-overlay');
+  const confirmBtn = modal.querySelector('.aircrew-wheel-confirm');
+  const cancelBtn = modal.querySelector('.aircrew-wheel-cancel');
+  const lists = {
+    hour: modal.querySelector('.aircrew-wheel-list[data-wheel="hour"]'),
+    minute: modal.querySelector('.aircrew-wheel-list[data-wheel="minute"]'),
+    period: modal.querySelector('.aircrew-wheel-list[data-wheel="period"]'),
+  };
+  const state = {
+    modal,
+    overlay,
+    confirmBtn,
+    cancelBtn,
+    lists,
+    wheels: {},
+    values: { ...AIRCREW_WHEEL_DEFAULT },
+    current: null,
+  };
+
+  const buildWheel = (type) => {
+    const list = lists[type];
+    if (!list) return null;
+    const items = Array.from(list.querySelectorAll('.aircrew-wheel-item'));
+    const rowHeight = items[0]?.getBoundingClientRect().height || 36;
+    const wheel = {
+      list,
+      items,
+      rowHeight,
+      snapTimer: null,
+      selectedIndex: 0,
+    };
+
+    const applySelection = (index) => {
+      const clamped = Math.min(Math.max(index, 0), items.length - 1);
+      wheel.selectedIndex = clamped;
+      items.forEach((item, idx) => item.classList.toggle('selected', idx === clamped));
+      const val = items[clamped]?.getAttribute('data-value');
+      if (val) {
+        state.values[type] = val;
+      }
+    };
+
+    const scrollToIndex = (index, behavior = 'auto') => {
+      const clamped = Math.min(Math.max(index, 0), items.length - 1);
+      const top = clamped * rowHeight;
+      list.scrollTo({ top, behavior: behavior === 'instant' ? 'auto' : behavior });
+      applySelection(clamped);
+    };
+
+    list.addEventListener('scroll', () => {
+      const idx = Math.round(list.scrollTop / rowHeight);
+      applySelection(idx);
+      if (wheel.snapTimer) {
+        clearTimeout(wheel.snapTimer);
+      }
+      wheel.snapTimer = window.setTimeout(() => {
+        scrollToIndex(idx, 'smooth');
+        wheel.snapTimer = null;
+      }, 120);
+    });
+
+    wheel.scrollToIndex = scrollToIndex;
+    wheel.applySelection = applySelection;
+    return wheel;
+  };
+
+  Object.keys(lists).forEach((key) => {
+    state.wheels[key] = buildWheel(key);
+  });
+
+  const syncValues = (mode = 'auto') => {
+    Object.entries(state.wheels).forEach(([type, wheel]) => {
+      if (!wheel) return;
+      const value = state.values[type];
+      const idx = wheel.items.findIndex(item => item.getAttribute('data-value') === value);
+      wheel.scrollToIndex(idx >= 0 ? idx : 0, mode === 'instant' ? 'instant' : 'auto');
+    });
+  };
+
+  const close = () => {
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('aircrew-wheel-open');
+    state.current = null;
+  };
+
+  const confirmSelection = () => {
+    if (!state.current || typeof state.current.onConfirm !== 'function') {
+      close();
+      return;
+    }
+    const payload = { ...state.values };
+    const time12 = `${payload.hour}:${payload.minute} ${payload.period}`;
+    const time24 = convertWheelSelectionTo24(payload);
+    const cb = state.current.onConfirm;
+    close();
+    cb({ time12, time24 });
+  };
+
+  const open = (target = {}) => {
+    state.current = target;
+    const preset = target.prefill || AIRCREW_WHEEL_DEFAULT;
+    state.values = {
+      hour: preset.hour || AIRCREW_WHEEL_DEFAULT.hour,
+      minute: preset.minute || AIRCREW_WHEEL_DEFAULT.minute,
+      period: preset.period || AIRCREW_WHEEL_DEFAULT.period,
+    };
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('aircrew-wheel-open');
+    syncValues('instant');
+    window.setTimeout(() => {
+      confirmBtn?.focus();
+    }, 15);
+  };
+
+  confirmBtn?.addEventListener('click', confirmSelection);
+  cancelBtn?.addEventListener('click', close);
+  overlay?.addEventListener('click', close);
+  modal.addEventListener('keydown', (evt) => {
+    if (modal.getAttribute('aria-hidden') === 'true') return;
+    if (evt.key === 'Escape') {
+      evt.preventDefault();
+      close();
+    } else if (evt.key === 'Enter') {
+      evt.preventDefault();
+      confirmSelection();
+    }
+  });
+
+  return { open, close };
+}
+
+function wireAircrewArrivals() {
+  const cells = document.querySelectorAll('.aircrew-table .cell[data-carrier]');
+  if (!cells.length) return;
+  cells.forEach(cell => {
+    const carrier = cell.getAttribute('data-carrier');
+    const dateKey = cell.getAttribute('data-date');
+    const trigger = cell.querySelector('.aircrew-wheel-trigger');
+
+    const setBusy = (busy) => {
+      if (busy) {
+        cell.dataset.saving = '1';
+      } else {
+        delete cell.dataset.saving;
+      }
+    };
+
+    const addArrival = async (timeValue) => {
+      if (!timeValue) return;
+      if (cell.dataset.saving === '1') return;
+      setBusy(true);
+      try {
+        const data = await postAircrewUpdate('add', carrier, dateKey, { time: timeValue });
+        applyAircrewCells(carrier, data.cells);
+        showToast('Arrival added');
+      } catch (err) {
+        console.error(err);
+        showToast(err && err.message ? err.message : 'Unable to add arrival');
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    if (trigger && aircrewWheel) {
+      trigger.addEventListener('click', () => {
+        if (cell.dataset.saving === '1') return;
+        aircrewWheel.open({
+          onConfirm: ({ time24 }) => addArrival(time24),
+        });
+      });
+    }
+
+    cell.addEventListener('click', async (evt) => {
+      const removeBtn = evt.target.closest('.aircrew-chip-remove');
+      if (!removeBtn) return;
+      const chip = removeBtn.closest('.aircrew-chip');
+      const timeValue = chip ? chip.getAttribute('data-time') : null;
+      if (!timeValue || cell.dataset.saving === '1') return;
+      setBusy(true);
+      try {
+        const data = await postAircrewUpdate('remove', carrier, dateKey, { time: timeValue });
+        applyAircrewCells(carrier, data.cells);
+        showToast('Arrival removed');
+      } catch (err) {
+        console.error(err);
+        showToast(err && err.message ? err.message : 'Unable to remove arrival');
+      } finally {
+        setBusy(false);
+      }
+    });
+
+  });
+}
+
 function initLiveUpdates() {
   try {
     const es = new EventSource('/events');
@@ -415,6 +853,20 @@ function initLiveUpdates() {
           updateCoverageUI(payload);
         }
         updateConflictsUI();
+      } else if (payload?.type === 'aircrew') {
+        if (payload.week_id && window.currentWeekId && Number(payload.week_id) !== Number(window.currentWeekId)) {
+          return;
+        }
+        const batch = Array.isArray(payload.batch) ? payload.batch : [payload];
+        batch.forEach(item => {
+          if (!item || !item.carrier || !item.date) return;
+          const times = Array.isArray(item.times) ? item.times : [];
+          const cell = document.querySelector(`.aircrew-table .cell[data-carrier="${item.carrier}"][data-date="${item.date}"]`);
+          if (cell && !document.body.classList.contains('aircrew-wheel-open')) {
+            renderAircrewCell(cell, times);
+          }
+          updateShuttleSuggestionForDate(item.date);
+        });
       }
     });
   } catch (e) {
@@ -728,6 +1180,7 @@ window.confirmGenerateSchedule = confirmGenerateSchedule;
 document.addEventListener('DOMContentLoaded', () => {
   initThemeToggle();
   wireShiftSelects();
+  initShuttleSuggestions();
   wireTimeOff();
   initLiveUpdates();
   wireWeekNav();
@@ -738,4 +1191,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSelectColors();
   updateConflictsUI();
   initUndoCountdown();
+  aircrewWheel = initAircrewWheelPicker();
+  window.aircrewWheel = aircrewWheel;
+  wireAircrewArrivals();
 });

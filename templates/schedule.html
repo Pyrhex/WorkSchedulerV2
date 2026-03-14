@@ -5,7 +5,7 @@
   window.scheduleGenerated = {{ meta.schedule_generated|tojson }};
   window.currentWeekId = {{ meta.week_id|tojson }};
 </script>
-  <div class="content-inner">
+  <div class="content-inner full-width">
     <div class="banner success">{{ meta.success_banner }}</div>
 
     <section class="schedule-header">
@@ -132,7 +132,8 @@
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
-                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                {% set suggestion = shuttle_suggestions.get(d.key) %}
+                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
@@ -146,6 +147,11 @@
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
                     {% endfor %}
+                    {% if suggestion %}
+                      <option value="{{ suggestion }}" data-suggestion="1" data-suggestion-text="{{ suggestion }}" data-suggestion-label="{{ suggestion }} (Suggested)" {% if suggestion == val %}selected{% endif %}>
+                        {{ suggestion }} (Suggested)
+                      </option>
+                    {% endif %}
                   </select>
                 </div>
               {% endfor %}
@@ -153,6 +159,91 @@
           {% endfor %}
         </div>
       </div>
+
+      {% if aircrew and aircrew.carriers %}
+      {% set aircrew_arrivals = aircrew.arrivals if aircrew.arrivals is defined else {} %}
+      <div class="table-card">
+        <div class="table-title">Aircrew Arrivals</div>
+        <div class="schedule-table aircrew-table" role="table" aria-label="Aircrew Arrivals">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Carrier</div>
+            {% for d in week.dates %}
+              <div class="cell head" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          {% for carrier in aircrew.carriers %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ carrier }}</div>
+              {% for d in week.dates %}
+                {% set carrier_map = aircrew_arrivals.get(carrier, {}) %}
+                {% set times = carrier_map.get(d.key, []) %}
+                <div class="cell aircrew-cell {% if not times or times|length == 0 %}empty{% endif %}" role="cell" data-carrier="{{ carrier }}" data-date="{{ d.key }}" data-times="{{ times|tojson }}">
+                  <div class="aircrew-chips" aria-live="polite">
+                    {% if times and times|length > 0 %}
+                      {% for t in times %}
+                        <span class="aircrew-chip" data-time="{{ t }}">
+                          <span class="aircrew-chip-label">{{ t | aircrew_time }}</span>
+                          <button type="button" class="aircrew-chip-remove" aria-label="Remove {{ t | aircrew_time }}">&times;</button>
+                        </span>
+                      {% endfor %}
+                    {% endif %}
+                  </div>
+                  <button type="button" class="aircrew-wheel-trigger" aria-label="Add arrival">
+                    <span class="aircrew-wheel-trigger-icon" aria-hidden="true">+</span>
+                  </button>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="aircrew-wheel-modal" id="aircrew-wheel-modal" aria-hidden="true">
+        <div class="aircrew-wheel-overlay"></div>
+        <div class="aircrew-wheel-dialog" role="dialog" aria-modal="true" aria-labelledby="aircrew-wheel-title">
+          <div class="aircrew-wheel-card">
+            <div class="aircrew-wheel-header">
+              <div class="aircrew-wheel-title" id="aircrew-wheel-title">Select arrival time</div>
+            </div>
+            <div class="aircrew-wheel-viewport">
+              <div class="aircrew-wheel-highlight" aria-hidden="true"></div>
+              <span class="aircrew-wheel-guide aircrew-wheel-guide--top" aria-hidden="true">▲</span>
+              <span class="aircrew-wheel-guide aircrew-wheel-guide--bottom" aria-hidden="true">▼</span>
+              <div class="aircrew-wheel-columns">
+                <div class="aircrew-wheel-column aircrew-wheel-column--hour">
+                  <ul class="aircrew-wheel-list" data-wheel="hour">
+                    {% for h in range(1, 13) %}
+                      <li class="aircrew-wheel-item" data-value="{{ h }}">{{ h }}</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+                <div class="aircrew-wheel-column aircrew-wheel-column--minute">
+                  <ul class="aircrew-wheel-list" data-wheel="minute">
+                    {% for m in [0, 15, 30, 45] %}
+                      <li class="aircrew-wheel-item" data-value="{{ '%02d' % m }}">{{ '%02d' % m }}</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+                <div class="aircrew-wheel-column aircrew-wheel-column--period">
+                  <ul class="aircrew-wheel-list" data-wheel="period">
+                    {% for p in ['AM', 'PM'] %}
+                      <li class="aircrew-wheel-item" data-value="{{ p }}">{{ p }}</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <div class="aircrew-wheel-actions">
+              <button type="button" class="aircrew-wheel-action aircrew-wheel-confirm" aria-label="Confirm arrival time">
+                <span aria-hidden="true">✔</span>
+              </button>
+              <button type="button" class="aircrew-wheel-action aircrew-wheel-cancel" aria-label="Cancel">
+                <span aria-hidden="true">✕</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endif %}
 
       {% if maintenance %}
       <div class="table-card">
@@ -202,29 +293,4 @@
   </div>
 {% endblock %}
 
-{% block sidebar %}
-  <div class="sidebar-inner">
-    <div class="sidebar-title">Time Off</div>
-    <div class="sidebar-subtitle">Toggle approval to save and update the schedule.</div>
-    <ul class="timeoff-list">
-      {% for item in time_off %}
-        <li class="timeoff-item" data-id="{{ item.id }}">
-          <div class="info">
-            <div class="name">{{ item.name }} <span class="role">({{ item.role }})</span></div>
-            <div class="dates">
-              {{ item.label }}
-              <span class="status {{ 'approved' if item.approved else 'pending' }}" data-status>{{ '✔️' if item.approved else 'pending' }}</span>
-            </div>
-          </div>
-          <div class="actions" style="display:flex; align-items:center; gap:8px;">
-            <label class="switch" title="Toggle Approved">
-              <input type="checkbox" class="timeoff-toggle" {% if item.approved %}checked{% endif %} />
-              <span class="slider"></span>
-            </label>
-            <span class="toggle-label" style="font-size:12px; color:#475569;">Approved</span>
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
-  </div>
-{% endblock %}
+{% block sidebar_wrapper %}{% endblock %}
