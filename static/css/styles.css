@@ -358,6 +358,66 @@ html.dark-mode .aircrew-chip {
   background: transparent;
   transform: scale(1.05);
 }
+.aircrew-import-card { padding: 16px; }
+.aircrew-import-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.aircrew-import-title { font-weight: 700; font-size: 16px; }
+.aircrew-import-hint { margin: 4px 0 0; color: var(--muted); font-size: 13px; max-width: 520px; }
+.aircrew-import-form { margin-top: 16px; display: flex; flex-direction: column; gap: 12px; }
+.aircrew-import-dropzone {
+  border: 2px dashed var(--grid);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.aircrew-import-dropzone:hover {
+  border-color: var(--primary);
+  background: rgba(37, 99, 235, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.1);
+}
+.aircrew-import-dropzone input[type="file"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.aircrew-import-dropzone-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--surface-soft);
+  border: 1px solid var(--grid);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: var(--primary);
+}
+.aircrew-import-dropzone-text { display: flex; flex-direction: column; gap: 4px; }
+.aircrew-import-dropzone-title { font-weight: 600; }
+.aircrew-import-dropzone-subtitle { font-size: 13px; color: var(--muted); }
+.aircrew-import-field { display: flex; flex-direction: column; gap: 4px; max-width: 320px; }
+.aircrew-import-field label { font-weight: 600; font-size: 13px; }
+.aircrew-import-field select {
+  border: 1px solid var(--grid);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--select-bg);
+  font-size: 14px;
+  color: var(--text);
+}
+.aircrew-import-field-hint { font-size: 12px; color: var(--muted); }
+.aircrew-import-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.aircrew-import-status { font-size: 13px; color: var(--muted); min-height: 18px; }
+.aircrew-import-status[data-state="success"] { color: var(--success); }
+.aircrew-import-status[data-state="error"] { color: var(--danger); }
+.aircrew-import-warnings { margin: 0; padding-left: 18px; color: var(--danger); font-size: 12px; }
+.aircrew-import-form[data-uploading="1"] .btn {
+  opacity: 0.7;
+  pointer-events: none;
+}
 .aircrew-wheel-modal {
   position: fixed;
   inset: 0;

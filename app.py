@@ -6,9 +6,10 @@ import os
 import re
 import time
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from random import choice, sample
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections import defaultdict
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
@@ -305,6 +306,315 @@ SECTION_SHIFT_MAP = {
 SECTION_DISPLAY_ORDER = ["Breakfast Bar", "Front Desk", "Shuttle", "Maintenance"]
 
 AIRCREW_CARRIERS = ("Aeromexico", "Skywest")
+AIRCREW_CARRIER_ALIAS_MAP = {
+    "AEROMEXICO": "Aeromexico",
+    "AEROMEXIC": "Aeromexico",
+    "AEROMEXICOAIRLINES": "Aeromexico",
+    "AEROMEXICOAIR": "Aeromexico",
+    "AEROMEXICOAIRLINE": "Aeromexico",
+    "AEROMEXICOARRIVALS": "Aeromexico",
+    "AEROMEXICOAIRPORT": "Aeromexico",
+    "AEROMEXICOAEROMEXICO": "Aeromexico",
+    "AEROMEXICOFLIGHT": "Aeromexico",
+    "SKYWEST": "Skywest",
+    "SKYWESTAIRLINES": "Skywest",
+}
+AIRCREW_HEADER_SKIP = {"day", "days", "weekday", "week", "notes", "note", "flight", "flight#", "flight #", "flight number"}
+EXCEL_EPOCH = date(1899, 12, 30)
+MAX_AIRCREW_IMPORT_WARNINGS = 20
+AIRCREW_TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?", re.IGNORECASE)
+
+
+def _clean_header_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (date, datetime)):
+        return value.strftime("%Y-%m-%d")
+    return str(value).strip()
+
+
+def _normalize_carrier_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    label = str(value).strip()
+    if not label:
+        return ""
+    compact = re.sub(r"[^A-Za-z]", "", label).upper()
+    return AIRCREW_CARRIER_ALIAS_MAP.get(compact, label)
+
+
+def _guess_carrier_name_from_sheet(sheet) -> Optional[str]:
+    max_rows = min(sheet.max_row, 8)
+    for row in sheet.iter_rows(min_row=1, max_row=max_rows, values_only=True):
+        for cell in row:
+            text = _clean_header_value(cell)
+            if not text:
+                continue
+            low = text.lower()
+            if "crew schedule" in low:
+                pos = low.index("crew schedule")
+                name = text[:pos].strip(" -–—:")
+                normalized = _normalize_carrier_label(name)
+                if normalized:
+                    return normalized
+            normalized = _normalize_carrier_label(text)
+            if normalized in AIRCREW_CARRIERS:
+                return normalized
+    return None
+
+
+def _coerce_excel_date(value: Any) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        serial = int(value)
+        if serial <= 0:
+            return None
+        try:
+            return EXCEL_EPOCH + timedelta(days=serial)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        text = re.sub(r"(\d)(st|nd|rd|th)", r"\1", text, flags=re.IGNORECASE)
+        formats = [
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%m/%d/%y",
+            "%B %d, %Y",
+            "%b %d, %Y",
+            "%B %d %Y",
+            "%b %d %Y",
+            "%B %d",
+            "%b %d",
+        ]
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                if "%Y" not in fmt:
+                    today = date.today()
+                    parsed = parsed.replace(year=today.year)
+                return parsed.date()
+            except ValueError:
+                continue
+    return None
+
+
+def _excel_fraction_to_time(value: float) -> Optional[str]:
+    if value < 0:
+        return None
+    minutes_total = int(round(float(value) * 24 * 60))
+    hour = (minutes_total // 60) % 24
+    minute = minutes_total % 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _extract_aircrew_times_from_cell(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, datetime):
+        return [f"{value.hour:02d}:{value.minute:02d}"]
+    if isinstance(value, timedelta):
+        minutes_total = int(value.total_seconds() // 60)
+        hour = (minutes_total // 60) % 24
+        minute = minutes_total % 60
+        return [f"{hour:02d}:{minute:02d}"]
+    if isinstance(value, dt_time):
+        return [f"{value.hour:02d}:{value.minute:02d}"]
+    if isinstance(value, (int, float)):
+        if 0 <= float(value) < 2:
+            converted = _excel_fraction_to_time(float(value))
+            return [converted] if converted else []
+        text = str(value)
+    else:
+        text = str(value)
+    text = text.strip()
+    if not text:
+        return []
+
+    text = text.replace("\r", "\n")
+    raw_tokens = re.split(r"[,\n;/]+", text)
+    candidates: list[str] = []
+    for token in raw_tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            matches = AIRCREW_TIME_PATTERN.findall(token)
+            if matches:
+                candidates.extend(matches)
+                continue
+        candidates.append(token)
+    if not candidates:
+        candidates.extend(AIRCREW_TIME_PATTERN.findall(text))
+
+    normalized: list[str] = []
+    for token in candidates:
+        cleaned = token.strip()
+        if not cleaned:
+            continue
+        compact = cleaned.replace(" ", "").replace(".", "")
+        no_minute = re.fullmatch(r"(\d{1,2})(AM|PM)", compact, flags=re.IGNORECASE)
+        if no_minute:
+            compact = f"{no_minute.group(1)}:00{no_minute.group(2)}"
+        colonless = re.fullmatch(r"(\d{1,2})(\d{2})(AM|PM)?", compact, flags=re.IGNORECASE)
+        if colonless and ":" not in compact:
+            suffix = colonless.group(3) or ""
+            compact = f"{colonless.group(1)}:{colonless.group(2)}{suffix}"
+        normalized.append(compact)
+
+    result: list[str] = []
+    for token in normalized:
+        try:
+            result.append(_normalize_aircrew_time(token))
+        except ValueError:
+            continue
+    return sorted(set(result))
+
+
+def _parse_tabular_aircrew_sheet(workbook, forced_carrier: Optional[str] = None) -> tuple[dict[tuple[str, date], set[str]], list[str]]:
+    sheet = workbook.active
+    header_row_idx: Optional[int] = None
+    headers: list[str] = []
+    date_col_idx: Optional[int] = None
+    max_scan = min(sheet.max_row, 25)
+    for idx, row in enumerate(sheet.iter_rows(min_row=1, max_row=max_scan, values_only=True), start=1):
+        values = [_clean_header_value(cell) for cell in row]
+        for col_idx, label in enumerate(values):
+            if isinstance(label, str) and "date" in label.lower():
+                header_row_idx = idx
+                headers = values
+                date_col_idx = col_idx
+                break
+        if header_row_idx is not None:
+            break
+    if header_row_idx is None or date_col_idx is None:
+        raise ValueError("Could not locate a 'Date' column in the spreadsheet.")
+
+    carrier_columns: list[tuple[int, str]] = []
+    for idx, header in enumerate(headers):
+        if idx == date_col_idx:
+            continue
+        label = header.strip()
+        if not label:
+            continue
+        lowered = label.lower()
+        if "date" in lowered or lowered in AIRCREW_HEADER_SKIP:
+            continue
+        carrier_columns.append((idx, label))
+
+    if not carrier_columns:
+        raise ValueError("No carrier columns were detected. Add at least one column with the carrier name.")
+    if len(carrier_columns) == 1:
+        guessed_name = forced_carrier or _guess_carrier_name_from_sheet(sheet)
+        normalized = _normalize_carrier_label(guessed_name)
+        if normalized:
+            carrier_columns[0] = (carrier_columns[0][0], normalized)
+
+    updates: dict[tuple[str, date], set[str]] = {}
+    warnings: list[str] = []
+
+    for row_idx, row in enumerate(
+        sheet.iter_rows(min_row=header_row_idx + 1, values_only=True),
+        start=header_row_idx + 1,
+    ):
+        if not row or not any(cell not in (None, "") for cell in row):
+            continue
+        raw_date = row[date_col_idx] if date_col_idx < len(row) else None
+        row_date = _coerce_excel_date(raw_date)
+        if not row_date:
+            if len(warnings) < MAX_AIRCREW_IMPORT_WARNINGS:
+                warnings.append(f"Row {row_idx}: skipped because the Date cell is blank or invalid.")
+            continue
+        for col_idx, carrier in carrier_columns:
+            value = row[col_idx] if col_idx < len(row) else None
+            times = _extract_aircrew_times_from_cell(value)
+            if not times:
+                continue
+            key = (carrier, row_date)
+            updates.setdefault(key, set()).update(times)
+
+    return updates, warnings
+
+
+def _parse_vertical_aircrew_sheet(workbook, forced_carrier: Optional[str] = None) -> tuple[dict[tuple[str, date], set[str]], list[str]]:
+    sheet = workbook.active
+    header_row_idx: Optional[int] = None
+    date_col_idx: Optional[int] = None
+    eta_col_idx: Optional[int] = None
+    max_scan = min(sheet.max_row, 25)
+    for idx, row in enumerate(sheet.iter_rows(min_row=1, max_row=max_scan, values_only=True), start=1):
+        values = [_clean_header_value(cell) for cell in row]
+        lowered = [val.lower() for val in values]
+        for col_idx, label in enumerate(lowered):
+            if date_col_idx is None and "date" in label:
+                date_col_idx = col_idx
+            if eta_col_idx is None and any(token in label for token in ("eta", "time", "arrival")):
+                eta_col_idx = col_idx
+        if date_col_idx is not None and eta_col_idx is not None:
+            header_row_idx = idx
+            break
+
+    if header_row_idx is None or date_col_idx is None or eta_col_idx is None:
+        raise ValueError("Could not locate both date and arrival time columns in this sheet.")
+
+    carrier = forced_carrier or _guess_carrier_name_from_sheet(sheet)
+    carrier = _normalize_carrier_label(carrier)
+    if not carrier:
+        raise ValueError("Could not determine which carrier this file belongs to. Choose one in the upload form.")
+
+    updates: dict[tuple[str, date], set[str]] = {}
+    warnings: list[str] = []
+    for row_idx, row in enumerate(
+        sheet.iter_rows(min_row=header_row_idx + 1, values_only=True),
+        start=header_row_idx + 1,
+    ):
+        if not row or not any(cell not in (None, "") for cell in row):
+            continue
+        raw_date = row[date_col_idx] if date_col_idx < len(row) else None
+        row_date = _coerce_excel_date(raw_date)
+        if not row_date:
+            if len(warnings) < MAX_AIRCREW_IMPORT_WARNINGS:
+                warnings.append(f"Row {row_idx}: skipped because the Date cell is blank or invalid.")
+            continue
+        time_value = row[eta_col_idx] if eta_col_idx < len(row) else None
+        times = _extract_aircrew_times_from_cell(time_value)
+        if not times:
+            continue
+        key = (carrier, row_date)
+        updates.setdefault(key, set()).update(times)
+    if not updates:
+        raise ValueError("No arrival times were found in the spreadsheet.")
+    return updates, warnings
+
+
+def _parse_aircrew_workbook(workbook, forced_carrier: Optional[str] = None) -> tuple[dict[tuple[str, date], set[str]], list[str]]:
+    errors: list[str] = []
+    try:
+        return _parse_tabular_aircrew_sheet(workbook, forced_carrier)
+    except ValueError as exc:
+        errors.append(str(exc))
+    try:
+        return _parse_vertical_aircrew_sheet(workbook, forced_carrier)
+    except ValueError as exc:
+        errors.append(str(exc))
+    raise ValueError(errors[-1] if errors else "Unable to parse the uploaded workbook.")
+
+
+def _get_or_create_week(session: Session, start_d: date) -> Week:
+    wk = session.scalar(select(Week).where(Week.start_date == start_d))
+    if wk:
+        return wk
+    wk = Week(start_date=start_d)
+    session.add(wk)
+    session.flush()
+    return wk
 
 
 def _normalize_aircrew_time(value: str) -> str:
@@ -2192,6 +2502,138 @@ def upsert_aircrew_arrival():
         "week_id": week_id,
         "cells": response_cells,
     })
+
+
+@app.route("/aircrew/import", methods=["POST"])
+def import_aircrew_schedule():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"ok": False, "error": "Select an Excel file to upload."}), 400
+    preferred_carrier_raw = (request.form.get("carrier") or "").strip()
+    preferred_carrier = _normalize_carrier_label(preferred_carrier_raw) if preferred_carrier_raw else None
+    payload = upload.read()
+    if not payload:
+        return jsonify({"ok": False, "error": "The uploaded file is empty."}), 400
+    try:
+        workbook = load_workbook(io.BytesIO(payload), data_only=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "Unable to read that Excel file. Please upload a .xlsx file."}), 400
+    try:
+        parsed_updates, warnings = _parse_aircrew_workbook(workbook, preferred_carrier)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    if not parsed_updates:
+        return jsonify({"ok": False, "error": "No arrival times were found in the spreadsheet."}), 400
+
+    display_week_id = request.form.get("week_id")
+    try:
+        display_week_id_int = int(display_week_id)
+    except (TypeError, ValueError):
+        display_week_id_int = None
+
+    touched_dates: set[date] = set()
+    touched_carriers: set[str] = set()
+    per_week_batches: dict[int, list[dict]] = defaultdict(list)
+    week_cells: dict[str, dict[str, list[str]]] = {}
+    updated_cells = 0
+
+    with SessionLocal() as s:
+        display_week = s.get(Week, display_week_id_int) if display_week_id_int else None
+        for (carrier, day), times_set in parsed_updates.items():
+            normalized_times = sorted(times_set)
+            touched_dates.add(day)
+            touched_carriers.add(carrier)
+            week_start = week_start_for_date(day)
+            week = _get_or_create_week(s, week_start)
+            row = s.scalar(
+                select(AircrewArrival).where(
+                    AircrewArrival.week_id == week.id,
+                    AircrewArrival.carrier == carrier,
+                    AircrewArrival.date == day,
+                )
+            )
+            existing_times = _deserialize_aircrew_times(row.times) if row else []
+            if existing_times == normalized_times:
+                continue
+            serialized = _serialize_aircrew_times(normalized_times)
+            if row:
+                row.times = serialized
+            else:
+                row = AircrewArrival(week_id=week.id, carrier=carrier, date=day, times=serialized)
+                s.add(row)
+            updated_cells += 1
+            entry = {
+                "carrier": carrier,
+                "date": day.isoformat(),
+                "times": normalized_times,
+            }
+            per_week_batches[week.id].append(entry)
+            if display_week and week.id == display_week.id:
+                week_cells.setdefault(carrier, {})[day.isoformat()] = normalized_times
+        s.commit()
+
+    for wk_id, batch in per_week_batches.items():
+        if batch:
+            broadcast_batch = [{**item, "week_id": wk_id} for item in batch]
+            _broadcast({"type": "aircrew", "week_id": wk_id, "batch": broadcast_batch})
+
+    warnings = warnings[:MAX_AIRCREW_IMPORT_WARNINGS]
+    response = {
+        "ok": True,
+        "updated_cells": updated_cells,
+        "touched_dates": sorted(d.isoformat() for d in touched_dates),
+        "touched_carriers": sorted(touched_carriers),
+        "week_cells": week_cells,
+        "warnings": warnings,
+        "weeks_affected": sorted(per_week_batches.keys()),
+    }
+    if updated_cells == 0:
+        response["message"] = "No changes were applied because the uploaded times match what is already saved."
+    else:
+        response["message"] = (
+            f"Updated {updated_cells} arrival cell{'s' if updated_cells != 1 else ''} "
+            f"across {len(touched_dates)} date{'s' if len(touched_dates) != 1 else ''}."
+        )
+    return jsonify(response)
+
+
+@app.route("/aircrew/template.xlsx")
+def aircrew_import_template():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Aircrew Import"
+    headers = ["Date"] + list(AIRCREW_CARRIERS)
+    for idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=idx, value=header)
+        cell.font = Font(bold=True)
+        width = 16 if idx == 1 else 22
+        ws.column_dimensions[get_column_letter(idx)].width = width
+    today = date.today()
+    start = today.replace(day=1)
+    carrier_count = len(AIRCREW_CARRIERS)
+    sample_rows = [
+        ["10:15pm\n11:45pm", "8:30am"],
+        ["2:05am", "6:15pm"],
+        ["", "7:45am"],
+        ["11:05pm", "11:15pm\n11:45pm"],
+    ]
+    for offset, row_samples in enumerate(sample_rows):
+        dte = start + timedelta(days=offset)
+        ws.cell(row=offset + 2, column=1, value=dte)
+        ws.cell(row=offset + 2, column=1).number_format = "yyyy-mm-dd"
+        row_values = list(row_samples) + [""] * max(0, carrier_count - len(row_samples))
+        for col_offset, sample in enumerate(row_values[:carrier_count], start=2):
+            ws.cell(row=offset + 2, column=col_offset, value=sample)
+    ws.cell(row=len(sample_rows) + 3, column=1, value="Use commas or line breaks to list multiple arrival times in a day.")
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="aircrew-import-template.xlsx",
+    )
 
 
 @app.route("/timeoff/delete/<int:tid>", methods=["POST"])

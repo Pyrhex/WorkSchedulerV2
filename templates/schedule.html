@@ -243,6 +243,43 @@
           </div>
         </div>
       </div>
+      <div class="table-card aircrew-import-card" aria-labelledby="aircrew-import-title">
+        <div class="aircrew-import-header">
+          <div>
+            <div class="aircrew-import-title" id="aircrew-import-title">Upload monthly aircrew schedule</div>
+            <p class="aircrew-import-hint">
+              Use an Excel sheet with a <strong>Date</strong> column and one column per carrier. Separate multiple times with commas or line breaks.
+            </p>
+          </div>
+          <a class="btn ghost" href="/aircrew/template.xlsx" target="_blank" rel="noopener">Download template</a>
+        </div>
+        <form id="aircrew-import-form" class="aircrew-import-form" method="post" enctype="multipart/form-data" novalidate>
+          <input type="hidden" name="week_id" value="{{ meta.week_id }}">
+          <label class="aircrew-import-dropzone" for="aircrew-import-file">
+            <input type="file" name="file" id="aircrew-import-file" accept=".xlsx,.xlsm,.xls" required>
+            <div class="aircrew-import-dropzone-icon" aria-hidden="true">+</div>
+            <div class="aircrew-import-dropzone-text">
+              <span class="aircrew-import-dropzone-title">Choose or drop your Excel file</span>
+              <span class="aircrew-import-dropzone-subtitle">Only rows with dates + times are applied. Blank cells leave existing arrivals unchanged.</span>
+            </div>
+          </label>
+          <div class="aircrew-import-field">
+            <label for="aircrew-import-carrier">Carrier in this file</label>
+            <select id="aircrew-import-carrier" name="carrier">
+              <option value="">Auto detect from sheet</option>
+              {% for carrier in aircrew.carriers %}
+                <option value="{{ carrier }}">{{ carrier }}</option>
+              {% endfor %}
+            </select>
+            <span class="aircrew-import-field-hint">Choose a carrier if the workbook only lists one (e.g., Aeromexico).</span>
+          </div>
+          <div class="aircrew-import-actions">
+            <button class="btn primary" type="submit">Upload &amp; Apply</button>
+            <span class="aircrew-import-status" aria-live="polite"></span>
+          </div>
+          <ul class="aircrew-import-warnings" aria-live="polite" hidden></ul>
+        </form>
+      </div>
       {% endif %}
 
       {% if maintenance %}

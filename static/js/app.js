@@ -837,6 +837,114 @@ function wireAircrewArrivals() {
   });
 }
 
+function wireAircrewImportForm() {
+  const form = document.getElementById('aircrew-import-form');
+  if (!form) return;
+  const fileInput = form.querySelector('#aircrew-import-file');
+  const statusEl = form.querySelector('.aircrew-import-status');
+  const warningsList = form.querySelector('.aircrew-import-warnings');
+  const dropzoneTitle = form.querySelector('.aircrew-import-dropzone-title');
+  const dropzoneSubtitle = form.querySelector('.aircrew-import-dropzone-subtitle');
+  const defaultTitle = dropzoneTitle ? dropzoneTitle.textContent : '';
+  const defaultSubtitle = dropzoneSubtitle ? dropzoneSubtitle.textContent : '';
+
+  const setStatus = (state, text) => {
+    if (!statusEl) return;
+    if (state) {
+      statusEl.setAttribute('data-state', state);
+    } else {
+      statusEl.removeAttribute('data-state');
+    }
+    statusEl.textContent = text || '';
+  };
+
+  const renderWarnings = (items) => {
+    if (!warningsList) return;
+    const list = Array.isArray(items) ? items.filter(Boolean) : [];
+    warningsList.innerHTML = '';
+    if (!list.length) {
+      warningsList.hidden = true;
+      return;
+    }
+    list.forEach(item => {
+      const li = document.createElement('li');
+      li.textContent = item;
+      warningsList.appendChild(li);
+    });
+    warningsList.hidden = false;
+  };
+
+  const resetFileLabel = () => {
+    if (dropzoneTitle) dropzoneTitle.textContent = defaultTitle;
+    if (dropzoneSubtitle) dropzoneSubtitle.textContent = defaultSubtitle;
+  };
+
+  fileInput?.addEventListener('change', () => {
+    if (!fileInput) return;
+    if (fileInput.files && fileInput.files.length > 0) {
+      if (dropzoneTitle) {
+        dropzoneTitle.textContent = fileInput.files[0].name;
+      }
+      if (dropzoneSubtitle) {
+        dropzoneSubtitle.textContent = 'Ready to upload';
+      }
+    } else {
+      resetFileLabel();
+    }
+  });
+
+  form.addEventListener('submit', async (evt) => {
+    evt.preventDefault();
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      setStatus('error', 'Select an Excel file first.');
+      return;
+    }
+    const formData = new FormData(form);
+    form.dataset.uploading = '1';
+    setStatus('info', 'Uploading…');
+    renderWarnings([]);
+    try {
+      const res = await fetch('/aircrew/import', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || 'Upload failed');
+      }
+      if (data.week_cells) {
+        Object.entries(data.week_cells).forEach(([carrier, cells]) => {
+          applyAircrewCells(carrier, cells);
+        });
+      }
+      const carriersOnPage = new Set();
+      document.querySelectorAll('.aircrew-table .cell[data-carrier]').forEach(cell => {
+        const name = cell.getAttribute('data-carrier');
+        if (name) carriersOnPage.add(name);
+      });
+      const touched = Array.isArray(data.touched_carriers) ? data.touched_carriers : [];
+      const missingCarriers = touched.filter(name => name && !carriersOnPage.has(name));
+      const extraWarnings = missingCarriers.length
+        ? [`New carrier${missingCarriers.length > 1 ? 's' : ''} (${missingCarriers.join(', ')}) were added. Reload to see their rows.`]
+        : [];
+      renderWarnings([...(data.warnings || []), ...extraWarnings]);
+      setStatus('success', data.message || 'Aircrew arrivals updated.');
+      showToast('Aircrew schedule uploaded');
+    } catch (err) {
+      console.error(err);
+      const message = err && err.message ? err.message : 'Upload failed';
+      setStatus('error', message);
+      showToast(message);
+    } finally {
+      delete form.dataset.uploading;
+      if (fileInput) {
+        fileInput.value = '';
+      }
+      resetFileLabel();
+    }
+  });
+}
+
 function initLiveUpdates() {
   try {
     const es = new EventSource('/events');
@@ -1194,4 +1302,5 @@ document.addEventListener('DOMContentLoaded', () => {
   aircrewWheel = initAircrewWheelPicker();
   window.aircrewWheel = aircrewWheel;
   wireAircrewArrivals();
+  wireAircrewImportForm();
 });
