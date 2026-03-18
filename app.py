@@ -4334,8 +4334,8 @@ def export_schedule_excel(week_id: int):
         # Breakfast Bar: rows 37-42 (names in column D)
         # Maintenance: starts at the row whose column A label is "Maintenance"
         
-        # Create mapping of employee names to their row numbers
-        employee_rows: dict[str, dict[str, Any]] = {}
+        # Create mapping of employee (name, section) pairs to their row numbers
+        employee_rows: dict[tuple[str, str], dict[str, Any]] = {}
         section_blocks: dict[str, dict[str, Any]] = {}
         import re as _re_names
 
@@ -4414,7 +4414,7 @@ def export_schedule_excel(week_id: int):
             name_cell = ws[f'D{row}']
             primary = _primary_name_from_cell(name_cell.value)
             if primary:
-                employee_rows[primary] = {"row": row, "section": current_section}
+                employee_rows[(primary, current_section)] = {"row": row, "section": current_section}
                 if block.get("template_row") is None:
                     block["template_row"] = row
             elif _is_blank_slot(name_cell.value):
@@ -4442,7 +4442,7 @@ def export_schedule_excel(week_id: int):
                 ws.row_dimensions[dest_row].height = src_dim.height
 
         def _ensure_employee_row(section_name: str, employee_key: str, display_name: str) -> Optional[int]:
-            existing = employee_rows.get(employee_key)
+            existing = employee_rows.get((employee_key, section_name))
             if existing and existing["section"] == section_name:
                 return existing["row"]
 
@@ -4475,7 +4475,7 @@ def export_schedule_excel(week_id: int):
 
             ws[f'D{row_num}'] = display_name.upper()
             block["template_row"] = block.get("template_row") or row_num
-            employee_rows[employee_key] = {"row": row_num, "section": section_name}
+            employee_rows[(employee_key, section_name)] = {"row": row_num, "section": section_name}
             return row_num
 
         def _normalize_label_cell(value: Any) -> Optional[str]:
@@ -4599,14 +4599,6 @@ def export_schedule_excel(week_id: int):
                         shift_display = shift_display.replace("–", "-")
                         # normalize spacing around hyphen
                         shift_display = re.sub(r"\s*-\s*", " - ", shift_display)
-
-                    # If the shift belongs to a different section than the employee's primary,
-                    # append a role tag like "(FD)" at the end.
-                    emp_primary_role = emp_primary.get(employee_key)
-                    shift_role = shift_section_of(shift_value)
-                    if emp_primary_role and shift_role and shift_role != emp_primary_role:
-                        tag = role_abbrev.get(shift_role, shift_role)
-                        shift_display = f"{shift_display} ({tag})"
 
                     # Set the cell value
                     ws[f'{col_letter}{row_num}'] = shift_display
