@@ -33,6 +33,40 @@
       <button class="btn ghost" id="next-week" aria-label="Next Week">Next &gt;</button>
     </section>
 
+    {% if schedule_templates %}
+    <section class="template-panel" aria-label="Schedule Templates">
+      <div class="template-panel-header">
+        <div>
+          <div class="template-panel-title">Schedule Templates</div>
+          <div class="template-panel-subtitle">Save the current week and drop it onto any other week.</div>
+        </div>
+        <div class="template-panel-note">{{ schedule_templates|length }} slots</div>
+      </div>
+      <div class="template-slots" data-template-slots>
+        {% for slot in schedule_templates %}
+          <div class="template-slot" data-slot="{{ slot.slot }}" data-has-data="{{ 1 if slot.has_data else 0 }}" data-week-label="{{ slot.saved_week_label or '' }}" data-updated-label="{{ slot.updated_label or '' }}">
+            <div class="template-slot-header">
+              <div>
+                <div class="template-slot-name">{{ slot.name }}</div>
+                <div class="template-slot-status" data-slot-status>
+                  {% if slot.has_data %}
+                    Saved from {{ slot.saved_week_label or 'week' }}{% if slot.updated_label %} • {{ slot.updated_label }}{% endif %}
+                  {% else %}
+                    Empty slot
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+            <div class="template-slot-actions">
+              <button type="button" class="btn ghost sm template-slot-save" data-action="save">Save</button>
+              <button type="button" class="btn secondary sm template-slot-load" data-action="load" {% if not slot.has_data %}disabled{% endif %}>Load</button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
     
 
     <section class="tables">
@@ -55,7 +89,7 @@
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-date="{{ d.key }}">
-                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
@@ -66,6 +100,10 @@
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
                     {% endfor %}
+                    <option value="__custom__">Custom time…</option>
+                    {% if val and (val not in options) %}
+                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                    {% endif %}
                   </select>
                 </div>
               {% endfor %}
@@ -95,7 +133,7 @@
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Front Desk" data-employee="{{ emp }}" data-date="{{ d.key }}">
-                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
@@ -106,6 +144,10 @@
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
                     {% endfor %}
+                    <option value="__custom__">Custom time…</option>
+                    {% if val and (val not in options) %}
+                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                    {% endif %}
                   </select>
                 </div>
               {% endfor %}
@@ -134,7 +176,7 @@
                 {% set sel_cls = val | shift_class %}
                 {% set suggestion = shuttle_suggestions.get(d.key) %}
                 <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}">
-                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
@@ -147,6 +189,10 @@
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
                     {% endfor %}
+                    <option value="__custom__">Custom time…</option>
+                    {% if val and (val not in options) and (not suggestion or suggestion != val) %}
+                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                    {% endif %}
                     {% if suggestion %}
                       <option value="{{ suggestion }}" data-suggestion="1" data-suggestion-text="{{ suggestion }}" data-suggestion-label="{{ suggestion }} (Suggested)" {% if suggestion == val %}selected{% endif %}>
                         {{ suggestion }} (Suggested)
@@ -243,44 +289,56 @@
           </div>
         </div>
       </div>
-      <div class="table-card aircrew-import-card" aria-labelledby="aircrew-import-title">
-        <div class="aircrew-import-header">
-          <div>
-            <div class="aircrew-import-title" id="aircrew-import-title">Upload monthly aircrew schedule</div>
-            <p class="aircrew-import-hint">
-              Use an Excel sheet with a <strong>Date</strong> column and one column per carrier. Separate multiple times with commas or line breaks.
-            </p>
-          </div>
-          <a class="btn ghost" href="/aircrew/template.xlsx" target="_blank" rel="noopener">Download template</a>
-        </div>
-        <form id="aircrew-import-form" class="aircrew-import-form" method="post" enctype="multipart/form-data" novalidate>
-          <input type="hidden" name="week_id" value="{{ meta.week_id }}">
-          <label class="aircrew-import-dropzone" for="aircrew-import-file">
-            <input type="file" name="file" id="aircrew-import-file" accept=".xlsx,.xlsm,.xls" required>
-            <div class="aircrew-import-dropzone-icon" aria-hidden="true">+</div>
-            <div class="aircrew-import-dropzone-text">
-              <span class="aircrew-import-dropzone-title">Choose or drop your Excel file</span>
-              <span class="aircrew-import-dropzone-subtitle">Only rows with dates + times are applied. Blank cells leave existing arrivals unchanged.</span>
-            </div>
-          </label>
-          <div class="aircrew-import-field">
-            <label for="aircrew-import-carrier">Carrier in this file</label>
-            <select id="aircrew-import-carrier" name="carrier">
-              <option value="">Auto detect from sheet</option>
-              {% for carrier in aircrew.carriers %}
-                <option value="{{ carrier }}">{{ carrier }}</option>
-              {% endfor %}
-            </select>
-            <span class="aircrew-import-field-hint">Choose a carrier if the workbook only lists one (e.g., Aeromexico).</span>
-          </div>
-          <div class="aircrew-import-actions">
-            <button class="btn primary" type="submit">Upload &amp; Apply</button>
-            <span class="aircrew-import-status" aria-live="polite"></span>
-          </div>
-          <ul class="aircrew-import-warnings" aria-live="polite" hidden></ul>
-        </form>
-      </div>
       {% endif %}
+
+      {% set occupancy_values = occupancy.get('values') if occupancy else {} %}
+      <div class="table-card occupancy-card">
+        <div class="table-title occupancy-title">
+          <span>Occupancy</span>
+          <div class="occupancy-actions">
+            <button type="button" class="occupancy-upload-btn" id="occupancy-upload-trigger" aria-label="Upload occupancy report">
+              <span aria-hidden="true">⭱</span>
+            </button>
+            <input type="file" id="occupancy-upload-input" accept=".txt,.tsv,.csv" hidden>
+            <span class="occupancy-upload-status" id="occupancy-upload-status" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="schedule-table occupancy-table" role="table" aria-label="Occupancy">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Metric</div>
+            {% for d in week.dates %}
+              <div class="cell head" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          <div class="row" role="row">
+            <div class="cell sticky" role="rowheader">Hotel Occupancy</div>
+            {% for d in week.dates %}
+              {% set pct = occupancy_values.get(d.key) %}
+              <div class="cell occupancy-cell {% if pct is none %}empty{% endif %}" role="cell" data-date="{{ d.key }}" data-label="{{ d.label_long }}"{% if pct is not none %} data-value="{{ pct }}"{% endif %}>
+                <label class="occupancy-input-wrap">
+                  <input type="number"
+                         class="occupancy-input"
+                         min="0"
+                         max="100"
+                         step="1"
+                         inputmode="numeric"
+                         placeholder="0-100"
+                         value="{% if pct is not none %}{{ pct }}{% endif %}"
+                         aria-label="Set occupancy for {{ d.label_long }}">
+                  <span class="occupancy-input-suffix">%</span>
+                </label>
+                <span class="occupancy-cell-hint" aria-live="polite">
+                  {% if pct is not none %}
+                    Saved {{ pct }}%
+                  {% else %}
+                    Not set
+                  {% endif %}
+                </span>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
 
       {% if maintenance %}
       <div class="table-card">
@@ -302,7 +360,7 @@
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
                 <div class="cell" role="cell" data-section="Maintenance" data-employee="{{ emp }}" data-date="{{ d.key }}">
-                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
                         {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
@@ -313,6 +371,10 @@
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
                     {% endfor %}
+                    <option value="__custom__">Custom time…</option>
+                    {% if val and (val not in options) %}
+                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                    {% endif %}
                   </select>
                 </div>
               {% endfor %}

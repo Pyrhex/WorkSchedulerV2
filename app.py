@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import re
 import time
 import uuid
+from copy import copy as copy_style
 from datetime import date, datetime, time as dt_time, timedelta
 from random import choice, sample
 from collections import defaultdict
@@ -14,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
 import requests
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, UniqueConstraint, create_engine, func, select, update, delete
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -94,7 +96,7 @@ class Section(Base):
 class Employee(Base):
     __tablename__ = "employees"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String, unique=True)
+    name: Mapped[str] = mapped_column(String)
     section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"))
     section: Mapped[Section] = relationship("Section", back_populates="employees")
     # New editable fields
@@ -104,6 +106,8 @@ class Employee(Base):
     preferred_shifts_per_week: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_shifts_per_week: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     sort_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    first_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class EmployeeRole(Base):
@@ -152,6 +156,18 @@ class AircrewArrival(Base):
     times: Mapped[str] = mapped_column(String, default="")
 
 
+class OccupancySnapshot(Base):
+    __tablename__ = "occupancy_levels"
+    __table_args__ = (
+        UniqueConstraint("week_id", "date", name="uniq_occupancy_week_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_id: Mapped[int] = mapped_column(ForeignKey("weeks.id"))
+    date: Mapped[date] = mapped_column(Date)
+    percentage: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
 class TimeOff(Base):
     __tablename__ = "timeoff"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -163,11 +179,43 @@ class TimeOff(Base):
     vacation: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ScheduleTemplate(Base):
+    __tablename__ = "schedule_templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slot: Mapped[int] = mapped_column(Integer, unique=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    saved_week_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 engine = create_engine("sqlite:///schedule.db", future=True)
 SessionLocal = sessionmaker(bind=engine, future=True, expire_on_commit=False)
 
 
 # ---- Helpers and constants ----
+def format_employee_name(first_name: str, last_name: Optional[str]) -> str:
+    """Build a display string from first/last name parts."""
+    parts = [(first_name or "").strip()]
+    if last_name:
+        parts.append(last_name.strip())
+    return " ".join(p for p in parts if p)
+
+
+def employee_by_role(session: Session, *, name: str, role: str) -> Optional[Employee]:
+    """Fetch an employee by name constrained to a specific role/section."""
+    stmt = (
+        select(Employee)
+        .join(Section)
+        .where(Employee.name == name)
+    )
+    if role:
+        stmt = stmt.where(Section.name == role)
+    return session.scalar(stmt)
+
+
 def daterange(start: date, days: int) -> List[date]:
     return [start + timedelta(days=i) for i in range(days)]
 
@@ -230,6 +278,9 @@ SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
 SUGGESTED_CREW_REGEX = re.compile(r"^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$", re.IGNORECASE)
 TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
 NEUTRAL_ASSIGNMENT_VALUES = {"Set"} | TIME_OFF_VALUES
+TEMPLATE_SLOT_COUNT = 3
+OCCUPANCY_DATE_RE = re.compile(r"\b(\d{2})-(\d{2})-(\d{2})\b")
+OCCUPANCY_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 
 
 def is_suggested_crew_label(value: Optional[str]) -> bool:
@@ -797,6 +848,29 @@ def init_db_once():
                 )
                 """
             )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS occupancy_levels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    week_id INTEGER NOT NULL,
+                    date DATE NOT NULL,
+                    percentage INTEGER,
+                    UNIQUE(week_id, date)
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS schedule_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot INTEGER UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    saved_week_start DATE,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
         # Ensure new column exists for assignments.dismissed_timeoff (SQLite light migration)
         with engine.connect() as conn:
             a_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(assignments)").fetchall()]
@@ -876,11 +950,12 @@ def init_db_once():
             s.commit()
 
 
-def has_approved_timeoff(name: str, dte: date, s: Session, exclude_id: Optional[int] = None) -> bool:
+def has_approved_timeoff(name: str, role: str, dte: date, s: Session, exclude_id: Optional[int] = None) -> bool:
     stmt = (
         select(TimeOff)
         .where(
             TimeOff.name == name,
+            TimeOff.role == role,
             TimeOff.approved.is_(True),
             TimeOff.from_date <= dte,
             TimeOff.to_date >= dte,
@@ -891,10 +966,12 @@ def has_approved_timeoff(name: str, dte: date, s: Session, exclude_id: Optional[
     to = s.scalar(stmt)
     return to is not None
 
-def has_any_timeoff(name: str, dte: date, s: Session) -> bool:
+
+def has_any_timeoff(name: str, role: str, dte: date, s: Session) -> bool:
     to = s.scalar(
         select(TimeOff).where(
             TimeOff.name == name,
+            TimeOff.role == role,
             TimeOff.from_date <= dte,
             TimeOff.to_date >= dte,
         )
@@ -915,6 +992,8 @@ def _update_assignments_for_timeoff(
     """Apply the time-off approval state to existing assignments across all weeks."""
     if not employee:
         return
+    section = s.get(Section, employee.section_id)
+    role_name = section.name if section else ""
     assignments = s.scalars(
         select(Assignment).where(
             Assignment.employee_id == employee.id,
@@ -930,7 +1009,7 @@ def _update_assignments_for_timeoff(
             if hasattr(Assignment, "dismissed_timeoff"):
                 assignment.dismissed_timeoff = 0
         else:
-            if assignment.value in TIME_OFF_VALUES and not has_approved_timeoff(employee.name, assignment.date, s, exclude_id):
+            if assignment.value in TIME_OFF_VALUES and not has_approved_timeoff(employee.name, role_name, assignment.date, s, exclude_id):
                 assignment.value = "Set"
                 if hasattr(Assignment, "dismissed_timeoff"):
                     assignment.dismissed_timeoff = 0
@@ -941,11 +1020,14 @@ def sync_timeoff_to_assignments(week_id: int, s: Session):
     days = list(daterange(wk.start_date, 7))
     # For each employee and day, if approved time off, set TIME OFF label
     for emp in s.scalars(select(Employee)):
+        sec = s.get(Section, emp.section_id)
+        role_name = sec.name if sec else ""
         for d in days:
             to_rec = s.scalar(
                 select(TimeOff)
                 .where(
                     TimeOff.name == emp.name,
+                    TimeOff.role == role_name,
                     TimeOff.approved.is_(True),
                     TimeOff.from_date <= d,
                     TimeOff.to_date >= d,
@@ -968,19 +1050,22 @@ def seed_example_assignments_db(week_id: int, s: Session):
     sh_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Shuttle"))]
     maint_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Maintenance"))]
     wk = s.get(Week, week_id)
+    section_names = {sec.id: sec.name for sec in s.scalars(select(Section))}
     for d in daterange(wk.start_date, 7):
         # Breakfast Bar
         for eid in bb_emp_ids[:2]:  # only a couple for color variety
             emp = s.get(Employee, eid)
-            if emp and has_any_timeoff(emp.name, d, s):
+            role_name = section_names.get(emp.section_id, "") if emp else ""
+            if emp and has_any_timeoff(emp.name, role_name, d, s):
                 continue
             a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
-            if a:
-                a.value = choice(["5AM–12PM", "6AM–12PM", "7AM–12PM", "Set"])  # greens/blues
+        if a:
+            a.value = choice(["5AM–12PM", "6AM–12PM", "7AM–12PM", "Set"])  # greens/blues
         # Front Desk: sample among AM/PM/Audit staggered options
         for eid in fd_emp_ids:
             emp = s.get(Employee, eid)
-            if emp and has_any_timeoff(emp.name, d, s):
+            role_name = section_names.get(emp.section_id, "") if emp else ""
+            if emp and has_any_timeoff(emp.name, role_name, d, s):
                 continue
             a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
             if a:
@@ -994,7 +1079,8 @@ def seed_example_assignments_db(week_id: int, s: Session):
         # Shuttle
         for eid in sh_emp_ids:
             emp = s.get(Employee, eid)
-            if emp and has_any_timeoff(emp.name, d, s):
+            role_name = section_names.get(emp.section_id, "") if emp else ""
+            if emp and has_any_timeoff(emp.name, role_name, d, s):
                 continue
             a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
             if a:
@@ -1010,7 +1096,8 @@ def seed_example_assignments_db(week_id: int, s: Session):
         if maint_emp_ids:
             pick = choice(maint_emp_ids)
             emp = s.get(Employee, pick)
-            if emp and not has_any_timeoff(emp.name, d, s):
+            role_name = section_names.get(emp.section_id, "") if emp else ""
+            if emp and not has_any_timeoff(emp.name, role_name, d, s):
                 a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == pick, Assignment.date == d))
                 if a:
                     a.value = choice(["8AM–4:30PM", "Set"])
@@ -1321,6 +1408,13 @@ def build_week_context(week_id: int):
             if suggestion:
                 shuttle_suggestions[key] = suggestion
 
+        occupancy_rows = list(s.scalars(select(OccupancySnapshot).where(OccupancySnapshot.week_id == week_id)))
+        occupancy_values = {d["key"]: None for d in dates}
+        for row in occupancy_rows:
+            key = row.date.isoformat()
+            if key in occupancy_values:
+                occupancy_values[key] = row.percentage
+
         # time off
         to_list = []
         vacation_days: dict[str, set[str]] = {}
@@ -1377,6 +1471,7 @@ def build_week_context(week_id: int):
         }
 
         carriers = sorted(arrivals.keys())
+        template_slots = _template_slots_info(s)
 
         return {
             "week": {"label": "Week 1", "dates": dates, "sections": sections},
@@ -1392,6 +1487,10 @@ def build_week_context(week_id: int):
                 "arrivals": arrivals,
             },
             "shuttle_suggestions": shuttle_suggestions,
+            "occupancy": {
+                "values": occupancy_values,
+            },
+            "schedule_templates": template_slots,
         }
 
 
@@ -1435,6 +1534,7 @@ def index():
         shuttle=ctx["week"]["sections"].get("Shuttle"),
         maintenance=ctx["week"]["sections"].get("Maintenance"),
         aircrew=ctx.get("aircrew", {}),
+        occupancy=ctx.get("occupancy", {}),
         shuttle_suggestions=ctx.get("shuttle_suggestions", {}),
         counts=counts,
         missing=missing,
@@ -1454,6 +1554,7 @@ def index():
         vacation_days=ctx.get("vacation_days", {}),
         dismissed_days=ctx.get("dismissed_days", {}),
         double_booked=ctx["double_booked"],
+        schedule_templates=ctx.get("schedule_templates", []),
     )
 
 
@@ -1610,6 +1711,7 @@ def view_week(week_id: int):
         shuttle=ctx["week"]["sections"].get("Shuttle"),
         maintenance=ctx["week"]["sections"].get("Maintenance"),
         aircrew=ctx.get("aircrew", {}),
+        occupancy=ctx.get("occupancy", {}),
         shuttle_suggestions=ctx.get("shuttle_suggestions", {}),
         counts=counts,
         missing=missing,
@@ -1629,6 +1731,7 @@ def view_week(week_id: int):
         vacation_days=ctx.get("vacation_days", {}),
         dismissed_days=ctx.get("dismissed_days", {}),
         double_booked=ctx["double_booked"],
+        schedule_templates=ctx.get("schedule_templates", []),
     )
 
 
@@ -1765,18 +1868,44 @@ def admin_add_employee():
     if request.method == "GET":
         return render_template("admin_add_employee.html")
     # POST
-    name = (request.form.get("name") or "").strip()
+    first_name = (request.form.get("first_name") or "").strip()
+    last_name = (request.form.get("last_name") or "").strip()
     role = (request.form.get("role") or "").strip()
-    if not name or not role:
-        return render_template("admin_add_employee.html", error="Name and role are required"), 400
+    if not first_name or not role:
+        return render_template("admin_add_employee.html", error="First name and role are required"), 400
     with SessionLocal() as s:
-        # Check duplicates
-        exists = s.scalar(select(Employee).where(Employee.name == name))
-        if exists:
-            return render_template("admin_add_employee.html", error="Employee with this name already exists"), 400
         sec = s.scalar(select(Section).where(Section.name == role))
         if not sec:
             return render_template("admin_add_employee.html", error="Unknown role"), 400
+        first_lower = first_name.casefold()
+        last_lower = (last_name or "").casefold()
+        same_first = s.scalar(
+            select(func.count())
+            .select_from(Employee)
+            .where(
+                Employee.section_id == sec.id,
+                func.lower(Employee.first_name) == first_lower,
+            )
+        )
+        if same_first and not last_name:
+            return render_template(
+                "admin_add_employee.html",
+                error=f"Last name is required because {first_name} already exists in {role}.",
+            ), 400
+        duplicate = s.scalar(
+            select(Employee)
+            .where(
+                Employee.section_id == sec.id,
+                func.lower(Employee.first_name) == first_lower,
+                func.lower(func.coalesce(Employee.last_name, "")) == last_lower,
+            )
+        )
+        if duplicate:
+            return render_template(
+                "admin_add_employee.html",
+                error=f"{first_name} {last_name or ''} is already in {role}.",
+            ), 400
+        full_name = format_employee_name(first_name, last_name or None)
         # Optional fields
         preferred_shift = (request.form.get("preferred_shift") or "").strip() or None
         seniority_raw = (request.form.get("seniority") or "").strip()
@@ -1788,7 +1917,7 @@ def admin_add_employee():
         availability = (request.form.get("availability") or "").strip() or None
         sort_order = next_sort_order_for_section(s, sec.id)
         emp = Employee(
-            name=name,
+            name=full_name,
             section_id=sec.id,
             preferred_shift=preferred_shift,
             seniority=seniority,
@@ -1796,6 +1925,8 @@ def admin_add_employee():
             max_shifts_per_week=max_shifts_per_week,
             availability=availability,
             sort_order=sort_order,
+            first_name=first_name,
+            last_name=last_name or None,
         )
         s.add(emp)
         s.flush()
@@ -2033,7 +2164,9 @@ def delete_employee(eid: int):
         # Delete availability
         s.query(EmployeeAvailability).filter(EmployeeAvailability.employee_id == emp.id).delete()
         # Delete time off entries matching this name (name-based linkage)
-        s.query(TimeOff).filter(TimeOff.name == emp.name).delete()
+        section = s.get(Section, emp.section_id)
+        role_name = section.name if section else ""
+        s.query(TimeOff).filter(TimeOff.name == emp.name, TimeOff.role == role_name).delete()
         # Delete employee
         s.delete(emp)
         ensure_employee_sort_orders(s, [section_id])
@@ -2148,7 +2281,8 @@ def timeoff_page():
             label = t.from_date.strftime("%b %d") if same_day else f"{t.from_date.strftime('%b %d')} to {t.to_date.strftime('%b %d')}"
             items.append({"id": t.id, "name": t.name, "role": t.role, "label": label, "approved": t.approved, "vacation": bool(getattr(t, "vacation", False))})
         employees = list(s.scalars(select(Employee)))
-    return render_template("timeoff.html", time_off=items, employees=employees)
+        sections = list(s.scalars(select(Section)))
+    return render_template("timeoff.html", time_off=items, employees=employees, sections=sections)
 
 
 @app.route("/timeoff/new", methods=["GET", "POST"])
@@ -2156,17 +2290,20 @@ def timeoff_new():
     if request.method == 'GET':
         with SessionLocal() as s:
             employees = list(s.scalars(select(Employee)))
-        return render_template("timeoff_new.html", employees=employees)
+            sections = list(s.scalars(select(Section)))
+        return render_template("timeoff_new.html", employees=employees, sections=sections)
     # POST
     name = (request.form.get('name') or '').strip()
+    selected_role = (request.form.get('role') or '').strip()
     from_s = (request.form.get('from') or '').strip()
     to_s = (request.form.get('to') or '').strip()
     approved = bool(request.form.get('approved'))
     vacation = bool(request.form.get('vacation'))
-    if not name or not from_s or not to_s:
+    if not name or not selected_role or not from_s or not to_s:
         with SessionLocal() as s:
             employees = list(s.scalars(select(Employee)))
-        return render_template("timeoff_new.html", employees=employees, error="All fields are required"), 400
+            sections = list(s.scalars(select(Section)))
+        return render_template("timeoff_new.html", employees=employees, sections=sections, error="All fields are required"), 400
     try:
         fy, fm, fd = map(int, from_s.split('-'))
         ty, tm, td = map(int, to_s.split('-'))
@@ -2174,16 +2311,27 @@ def timeoff_new():
     except Exception:
         with SessionLocal() as s:
             employees = list(s.scalars(select(Employee)))
-        return render_template("timeoff_new.html", employees=employees, error="Invalid dates"), 400
+            sections = list(s.scalars(select(Section)))
+        return render_template("timeoff_new.html", employees=employees, sections=sections, error="Invalid dates"), 400
     if to_d < from_d:
         with SessionLocal() as s:
             employees = list(s.scalars(select(Employee)))
-        return render_template("timeoff_new.html", employees=employees, error="End date must be after start date"), 400
+            sections = list(s.scalars(select(Section)))
+        return render_template("timeoff_new.html", employees=employees, sections=sections, error="End date must be after start date"), 400
     timeoff_info = None
     with SessionLocal() as s:
-        emp = s.scalar(select(Employee).where(Employee.name == name))
-        role = s.get(Section, emp.section_id).name if emp else 'Unknown'
-        rec = TimeOff(name=name, role=role, from_date=from_d, to_date=to_d, approved=approved, vacation=vacation)
+        emp = employee_by_role(s, name=name, role=selected_role)
+        if not emp:
+            employees = list(s.scalars(select(Employee)))
+            sections = list(s.scalars(select(Section)))
+            return render_template(
+                "timeoff_new.html",
+                employees=employees,
+                sections=sections,
+                error="No employee with that name for the selected role.",
+            ), 400
+        role_name = s.get(Section, emp.section_id).name if emp else 'Unknown'
+        rec = TimeOff(name=name, role=role_name, from_date=from_d, to_date=to_d, approved=approved, vacation=vacation)
         s.add(rec)
         s.flush()
         timeoff_info = {
@@ -2334,7 +2482,21 @@ def assign():
         sec = s.scalar(select(Section).where(Section.name == section))
         if not sec:
             return jsonify({"ok": False, "error": "Unknown section"}), 400
-        emp = s.scalar(select(Employee).where(Employee.name == employee_name))
+        candidates = list(s.scalars(select(Employee).where(Employee.name == employee_name)))
+        emp = next((cand for cand in candidates if cand.section_id == sec.id), None)
+        if not emp:
+            for cand in candidates:
+                has_secondary = s.scalar(
+                    select(EmployeeRole).where(
+                        EmployeeRole.employee_id == cand.id,
+                        EmployeeRole.section_id == sec.id,
+                    ).limit(1)
+                )
+                if has_secondary:
+                    emp = cand
+                    break
+        if not emp and candidates:
+            emp = candidates[0]
         if not emp:
             return jsonify({"ok": False, "error": "Unknown employee"}), 400
         # Check permission: primary in section OR has secondary role mapping
@@ -2355,7 +2517,7 @@ def assign():
         # - When user selects a non-time-off value, record it and mark dismissed_timeoff=1
         #   to indicate a scheduled override despite approved time off.
         # - When user selects a time-off value (TIME OFF or REQ VAC), set it and clear the flag.
-        if has_approved_timeoff(emp.name, dte, s):
+        if has_approved_timeoff(emp.name, sec.name, dte, s):
             if value and value not in TIME_OFF_VALUES:
                 # Allow override with explicit shift
                 a.value = value
@@ -2418,6 +2580,78 @@ def assign():
 
     _notify_schedule_change(employee_name, section, dte, final_value)
     return jsonify(response_payload)
+
+
+def _normalize_template_slot(raw_slot: Any) -> Optional[int]:
+    try:
+        slot = int(raw_slot)
+    except (TypeError, ValueError):
+        return None
+    if slot < 1 or slot > TEMPLATE_SLOT_COUNT:
+        return None
+    return slot
+
+
+@app.route("/schedule-templates/save", methods=["POST"])
+def save_schedule_template():
+    data = request.get_json(force=True) or {}
+    slot = _normalize_template_slot(data.get("slot"))
+    if slot is None:
+        return jsonify({"ok": False, "error": "Invalid slot"}), 400
+    try:
+        week_id = int(data.get("week_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid week"}), 400
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return jsonify({"ok": False, "error": "Week not found"}), 404
+        payload = _capture_template_payload(s, week)
+        template = s.scalar(select(ScheduleTemplate).where(ScheduleTemplate.slot == slot))
+        if not template:
+            template = ScheduleTemplate(
+                slot=slot,
+                name=_template_slot_label(slot),
+                payload="{}",
+                saved_week_start=week.start_date,
+            )
+            s.add(template)
+        template.payload = json.dumps(payload)
+        template.saved_week_start = week.start_date
+        if not template.name:
+            template.name = _template_slot_label(slot)
+        template.updated_at = datetime.utcnow()
+        s.commit()
+        slot_info = _serialize_template_slot(slot, template)
+    return jsonify({"ok": True, "slot": slot_info, "week_id": week_id})
+
+
+@app.route("/schedule-templates/load", methods=["POST"])
+def load_schedule_template():
+    data = request.get_json(force=True) or {}
+    slot = _normalize_template_slot(data.get("slot"))
+    if slot is None:
+        return jsonify({"ok": False, "error": "Invalid slot"}), 400
+    try:
+        week_id = int(data.get("week_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid week"}), 400
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return jsonify({"ok": False, "error": "Week not found"}), 404
+        template = s.scalar(select(ScheduleTemplate).where(ScheduleTemplate.slot == slot))
+        if not template or not template.payload:
+            return jsonify({"ok": False, "error": "This slot is empty"}), 404
+        try:
+            payload = json.loads(template.payload)
+        except json.JSONDecodeError:
+            return jsonify({"ok": False, "error": "Template data is corrupted"}), 500
+        # Ensure assignments exist for this week before applying
+        _ensure_week_and_assignments(s, week.start_date)
+        applied = _apply_template_payload_to_week(payload, week, s)
+        slot_info = _serialize_template_slot(slot, template)
+    return jsonify({"ok": True, "slot": slot_info, "week_id": week_id, "applied": applied})
 
 
 @app.route("/aircrew/arrival", methods=["POST"])
@@ -2636,6 +2870,187 @@ def aircrew_import_template():
     )
 
 
+def _parse_occupancy_report(payload: str) -> dict[date, int]:
+    """Extract date -> occupancy percentage mapping from a text report."""
+    results: dict[date, int] = {}
+    for raw_line in payload.splitlines():
+        line = (raw_line or "").strip()
+        if not line:
+            continue
+        date_match = OCCUPANCY_DATE_RE.search(line)
+        if not date_match:
+            continue
+        month, day, year = map(int, date_match.groups())
+        year += 2000 if year < 70 else 1900
+        try:
+            dte = date(year, month, day)
+        except ValueError:
+            continue
+        percent_match = OCCUPANCY_PERCENT_RE.search(line, date_match.end())
+        if not percent_match:
+            continue
+        try:
+            pct = float(percent_match.group(1))
+        except ValueError:
+            continue
+        pct_int = max(0, min(100, int(round(pct))))
+        results[dte] = pct_int
+    return results
+
+
+@app.route("/occupancy", methods=["POST"])
+def update_occupancy():
+    data = request.get_json(force=True)
+    date_key = (data.get("date") or "").strip()
+    week_id_raw = data.get("week_id")
+    value_raw = data.get("value")
+
+    try:
+        week_id = int(week_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid week id"}), 400
+    if not date_key:
+        return jsonify({"ok": False, "error": "Date is required"}), 400
+    try:
+        y, m, d = map(int, date_key.split("-"))
+        dte = date(y, m, d)
+    except Exception:
+        return jsonify({"ok": False, "error": "Bad date"}), 400
+
+    def normalize_percentage(raw) -> Optional[int]:
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return None
+        try:
+            numeric = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError
+        if math.isnan(numeric):
+            raise ValueError
+        numeric = max(0.0, min(100.0, numeric))
+        return int(round(numeric))
+
+    try:
+        pct_value = normalize_percentage(value_raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Percentage must be between 0 and 100"}), 400
+
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return jsonify({"ok": False, "error": "Week not found"}), 404
+        week_end = week.start_date + timedelta(days=6)
+        if dte < week.start_date or dte > week_end:
+            return jsonify({"ok": False, "error": "Date outside of selected week"}), 400
+        row = s.scalar(
+            select(OccupancySnapshot).where(
+                OccupancySnapshot.week_id == week.id,
+                OccupancySnapshot.date == dte,
+            )
+        )
+        if pct_value is None:
+            if row:
+                s.delete(row)
+        else:
+            if not row:
+                row = OccupancySnapshot(week_id=week.id, date=dte, percentage=pct_value)
+                s.add(row)
+            else:
+                row.percentage = pct_value
+        s.commit()
+
+    _broadcast({
+        "type": "occupancy",
+        "week_id": week_id,
+        "items": [
+            {
+                "date": dte.isoformat(),
+                "value": pct_value,
+            }
+        ],
+    })
+    return jsonify({"ok": True, "date": dte.isoformat(), "value": pct_value})
+
+
+@app.route("/occupancy/import", methods=["POST"])
+def import_occupancy_report():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"ok": False, "error": "Select a report file to upload."}), 400
+    payload = upload.read()
+    if not payload:
+        return jsonify({"ok": False, "error": "The uploaded file is empty."}), 400
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = payload.decode("latin-1", errors="ignore")
+    parsed = _parse_occupancy_report(text)
+    if not parsed:
+        return jsonify({"ok": False, "error": "No dates with occupancy percentages were found in that file."}), 400
+
+    display_week_id = request.form.get("week_id")
+    try:
+        display_week_id_int = int(display_week_id)
+    except (TypeError, ValueError):
+        display_week_id_int = None
+
+    updated = 0
+    touched_dates: set[str] = set()
+    per_week_batches: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    week_cells: dict[str, Optional[int]] = {}
+
+    with SessionLocal() as s:
+        display_week = s.get(Week, display_week_id_int) if display_week_id_int else None
+        for dte, pct_value in sorted(parsed.items()):
+            week_start = week_start_for_date(dte)
+            week = _get_or_create_week(s, week_start)
+            row = s.scalar(
+                select(OccupancySnapshot).where(
+                    OccupancySnapshot.week_id == week.id,
+                    OccupancySnapshot.date == dte,
+                )
+            )
+            if row and row.percentage == pct_value:
+                continue
+            if row:
+                row.percentage = pct_value
+            else:
+                row = OccupancySnapshot(week_id=week.id, date=dte, percentage=pct_value)
+                s.add(row)
+            updated += 1
+            iso_key = dte.isoformat()
+            touched_dates.add(iso_key)
+            per_week_batches[week.id].append({"date": iso_key, "value": pct_value})
+            if display_week and display_week.id == week.id:
+                week_cells[iso_key] = pct_value
+        s.commit()
+
+    for wk_id, items in per_week_batches.items():
+        if not items:
+            continue
+        _broadcast({"type": "occupancy", "week_id": wk_id, "items": items})
+
+    if updated == 0:
+        return jsonify({
+            "ok": True,
+            "updated_cells": 0,
+            "touched_dates": sorted(touched_dates),
+            "week_cells": week_cells,
+            "message": "No changes were applied.",
+        })
+
+    return jsonify({
+        "ok": True,
+        "updated_cells": updated,
+        "touched_dates": sorted(touched_dates),
+        "week_cells": week_cells,
+        "message": f"Updated {updated} day{'s' if updated != 1 else ''}.",
+    })
+
+
 @app.route("/timeoff/delete/<int:tid>", methods=["POST"])
 def delete_timeoff(tid):
     with SessionLocal() as s:
@@ -2648,7 +3063,7 @@ def delete_timeoff(tid):
         
         # If it was approved, we need to update assignments back to "Set"
         if to.approved:
-            emp = s.scalar(select(Employee).where(Employee.name == to.name))
+            emp = employee_by_role(s, name=to.name, role=to.role or "")
             _update_assignments_for_timeoff(
                 s,
                 employee=emp,
@@ -2741,7 +3156,7 @@ def toggle_timeoff():
         if not to:
             return jsonify({"ok": False, "error": "Not found"}), 404
         to.approved = approved
-        emp = s.scalar(select(Employee).where(Employee.name == to.name))
+        emp = employee_by_role(s, name=to.name, role=to.role or "")
         _update_assignments_for_timeoff(
             s,
             employee=emp,
@@ -2851,7 +3266,7 @@ def toggle_timeoff_vacation():
         if not to:
             return jsonify({"ok": False, "error": "Not found"}), 404
         to.vacation = vacation
-        emp = s.scalar(select(Employee).where(Employee.name == to.name))
+        emp = employee_by_role(s, name=to.name, role=to.role or "")
         if to.approved:
             _update_assignments_for_timeoff(
                 s,
@@ -2932,6 +3347,14 @@ def generate_new_schedule_db(week_id: int):
         bb_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Breakfast Bar")))
         sh_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Shuttle")))
         wk = s.get(Week, week_id)
+        section_names = {sec.id: sec.name for sec in s.scalars(select(Section))}
+
+        def _available_for_day(eid: int, dte: date) -> bool:
+            emp = s.get(Employee, eid)
+            if not emp:
+                return False
+            role_name = section_names.get(emp.section_id, "")
+            return not has_any_timeoff(emp.name, role_name, dte, s)
 
         # Reset all
         s.execute(update(Assignment).where(Assignment.week_id == week_id).values(value="Set"))
@@ -2946,7 +3369,7 @@ def generate_new_schedule_db(week_id: int):
             for shift in shifts:
                 if pool:  # Only assign if there are available employees
                     # pick someone without time off request
-                    eligible = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
+                    eligible = [eid for eid in pool if _available_for_day(eid, d)]
                     if not eligible:
                         continue
                     eid = sample(eligible, k=1)[0]
@@ -2965,7 +3388,7 @@ def generate_new_schedule_db(week_id: int):
         for d in daterange(wk.start_date, 7):
             pool = fd_emp_ids[:]
             # AM
-            am_eligible = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
+            am_eligible = [eid for eid in pool if _available_for_day(eid, d)]
             am = sample(am_eligible, k=min(2, len(am_eligible))) if am_eligible else []
             # Senior earlier: sort by known seniority order
             def _sen_rank_fd(eid: int) -> int:
@@ -2988,7 +3411,7 @@ def generate_new_schedule_db(week_id: int):
                     else:
                         a.value = "AM (6:00AM–2:00PM)" if i == 0 else "AM (6:15AM–2:15PM)"
             # PM
-            pm_candidates = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
+            pm_candidates = [eid for eid in pool if _available_for_day(eid, d)]
             pm = sample(pm_candidates, k=min(2, len(pm_candidates))) if pm_candidates else []
             pm.sort(key=_sen_rank_fd)
             for i, eid in enumerate(pm):
@@ -3000,7 +3423,7 @@ def generate_new_schedule_db(week_id: int):
                     else:
                         a.value = "PM (2:00PM–10:00PM)" if i == 0 else "PM (2:15PM–10:15PM)"
             # Audit
-            au_candidates = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
+            au_candidates = [eid for eid in pool if _available_for_day(eid, d)]
             au = sample(au_candidates, k=min(2, len(au_candidates))) if au_candidates else []
             au.sort(key=_sen_rank_fd)
             for i, eid in enumerate(au):
@@ -3024,7 +3447,7 @@ def generate_new_schedule_db(week_id: int):
             for v in variants:
                 if not pool:
                     break
-                eligible = [eid for eid in pool if not has_any_timeoff(s.get(Employee, eid).name if s.get(Employee, eid) else '', d, s)]
+                eligible = [eid for eid in pool if _available_for_day(eid, d)]
                 if not eligible:
                     continue
                 eid = sample(eligible, k=1)[0]
@@ -3037,6 +3460,109 @@ def generate_new_schedule_db(week_id: int):
         sync_timeoff_to_assignments(week_id, s)
 
         s.commit()
+
+
+def _template_slot_label(slot: int) -> str:
+    return f"Template {slot}"
+
+
+def _serialize_template_slot(slot: int, row: Optional[ScheduleTemplate]) -> dict:
+    if row:
+        saved_range = format_week_label(row.saved_week_start) if row.saved_week_start else None
+        saved_week_start = row.saved_week_start.isoformat() if row.saved_week_start else None
+        updated_label = row.updated_at.strftime("%b %d, %Y %I:%M %p") if row.updated_at else None
+        updated_iso = row.updated_at.isoformat() if row.updated_at else None
+        return {
+            "slot": slot,
+            "name": row.name or _template_slot_label(slot),
+            "has_data": bool(row.payload),
+            "saved_week_start": saved_week_start,
+            "saved_week_label": saved_range,
+            "updated_label": updated_label,
+            "updated_at": updated_iso,
+        }
+    return {
+        "slot": slot,
+        "name": _template_slot_label(slot),
+        "has_data": False,
+        "saved_week_start": None,
+        "saved_week_label": None,
+        "updated_label": None,
+        "updated_at": None,
+    }
+
+
+def _capture_template_payload(session: Session, week: Week) -> dict:
+    assignments = session.scalars(select(Assignment).where(Assignment.week_id == week.id)).all()
+    items: list[dict[str, Any]] = []
+    for assignment in assignments:
+        if assignment.date is None:
+            continue
+        day_offset = (assignment.date - week.start_date).days
+        if day_offset < 0 or day_offset > 6:
+            continue
+        items.append(
+            {
+                "employee_id": assignment.employee_id,
+                "day": day_offset,
+                "value": assignment.value or "Set",
+                "dismissed": int(getattr(assignment, "dismissed_timeoff", 0) or 0),
+            }
+        )
+    return {
+        "version": 1,
+        "week_start": week.start_date.isoformat(),
+        "captured_at": datetime.utcnow().isoformat() + "Z",
+        "assignments": items,
+    }
+
+
+def _template_slots_info(session: Session, total_slots: int = TEMPLATE_SLOT_COUNT) -> list[dict]:
+    rows = {row.slot: row for row in session.scalars(select(ScheduleTemplate))}
+    return [_serialize_template_slot(idx, rows.get(idx)) for idx in range(1, total_slots + 1)]
+
+
+def _apply_template_payload_to_week(payload: dict, week: Week, session: Session) -> int:
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, list):
+        return 0
+    updated = 0
+    for entry in assignments:
+        try:
+            employee_id = int(entry.get("employee_id"))
+            day_offset = int(entry.get("day"))
+        except (TypeError, ValueError):
+            continue
+        if day_offset < 0 or day_offset > 6:
+            continue
+        target_date = week.start_date + timedelta(days=day_offset)
+        employee = session.get(Employee, employee_id)
+        if not employee:
+            continue
+        assignment = session.scalar(
+            select(Assignment).where(
+                Assignment.week_id == week.id,
+                Assignment.employee_id == employee_id,
+                Assignment.date == target_date,
+            )
+        )
+        if not assignment:
+            assignment = Assignment(
+                week_id=week.id,
+                employee_id=employee_id,
+                date=target_date,
+                value="Set",
+            )
+            session.add(assignment)
+        value = entry.get("value") or "Set"
+        assignment.value = value
+        dismissed_flag = bool(entry.get("dismissed"))
+        if hasattr(assignment, "dismissed_timeoff"):
+            assignment.dismissed_timeoff = dismissed_flag  # type: ignore[attr-defined]
+        updated += 1
+    session.commit()
+    sync_timeoff_to_assignments(week.id, session)
+    return updated
 
 
 def _ensure_week_and_assignments(s: Session, start_d: date) -> Week:
@@ -3343,7 +3869,7 @@ def generate_4_week_schedule(start_week_id: int):
                             _log(f"{d} FD {variant}: drop {emp_name.get(eid,'?')} (rest rule)")
                             continue
                         # Skip anyone with any time off request on this date
-                        if has_any_timeoff(emp_name.get(eid, ''), d, s):
+                        if has_any_timeoff(emp_name.get(eid, ''), emp_info.get(eid, {}).get("role", ""), d, s):
                             _log(f"{d} FD {variant}: drop {emp_name.get(eid,'?')} (time off request)")
                             _mark_dismissed(eid, d)
                             continue
@@ -3437,7 +3963,7 @@ def generate_4_week_schedule(start_week_id: int):
                     if not a or a.value != "Set":
                         _log(f"{d} MA: drop {emp_name.get(eid,'?')} (assigned {a.value if a else 'None'})")
                         continue
-                    if has_any_timeoff(emp_name.get(eid, ''), d, s):
+                    if has_any_timeoff(emp_name.get(eid, ''), emp_info.get(eid, {}).get("role", ""), d, s):
                         _log(f"{d} MA: drop {emp_name.get(eid,'?')} (time off request)")
                         _mark_dismissed(eid, d)
                         continue
@@ -3477,7 +4003,7 @@ def generate_4_week_schedule(start_week_id: int):
                         if not a or a.value != "Set":
                             _log(f"{d} BB {shift}: drop {emp_name.get(eid,'?')} (already assigned {a.value if a else 'None'})")
                             continue
-                        if has_any_timeoff(emp_name.get(eid, ''), d, s):
+                        if has_any_timeoff(emp_name.get(eid, ''), emp_info.get(eid, {}).get("role", ""), d, s):
                             _log(f"{d} BB {shift}: drop {emp_name.get(eid,'?')} (time off request)")
                             # Mark dismissed only if they'd otherwise pass availability/rest for this shift
                             if _is_available(eid, "Breakfast Bar", shift, d, avail_idx) and rest_ok(eid, d, "Breakfast Bar", shift):
@@ -3523,7 +4049,7 @@ def generate_4_week_schedule(start_week_id: int):
                         if not a or a.value != "Set":
                             _log(f"{d} SH {v}: drop {emp_name.get(eid,'?')} (already assigned {a.value if a else 'None'})")
                             continue
-                        if has_any_timeoff(emp_name.get(eid, ''), d, s):
+                        if has_any_timeoff(emp_name.get(eid, ''), emp_info.get(eid, {}).get("role", ""), d, s):
                             _log(f"{d} SH {v}: drop {emp_name.get(eid,'?')} (time off request)")
                             if rest_ok(eid, d, "Shuttle", v):
                                 _mark_dismissed(eid, d)
@@ -3766,6 +4292,10 @@ def export_schedule_excel(week_id: int):
         ctx = build_week_context(week_id)
         dates = ctx["week"]["dates"]
         sections = ctx["week"]["sections"]
+        occupancy_values = (ctx.get("occupancy") or {}).get("values") or {}
+        aircrew_ctx = ctx.get("aircrew") or {}
+        carriers = aircrew_ctx.get("carriers") or []
+        carrier_arrivals = aircrew_ctx.get("arrivals") or {}
         
         # Load the template
         wb = load_workbook(template_path)
@@ -3803,18 +4333,23 @@ def export_schedule_excel(week_id: int):
         # Maintenance: starts at the row whose column A label is "Maintenance"
         
         # Create mapping of employee names to their row numbers
-        employee_rows = {}
+        employee_rows: dict[str, dict[str, Any]] = {}
+        section_blocks: dict[str, dict[str, Any]] = {}
         import re as _re_names
 
         def _primary_name_from_cell(raw: str) -> Optional[str]:
             """Extract the primary employee name from a template name cell.
             Handles cases like "Sara and TBD", "Sara/TBD", "Sara & TBD" by
             returning just "SARA" and ignoring placeholders like "TBD" or "-".
-            Returns uppercase name or None if it's a placeholder.
+            Returns uppercase name or None if it's a placeholder or helper row (e.g., **OCC).
             """
             if not raw or not isinstance(raw, str):
                 return None
-            s = (raw or "").replace("*", "").strip().upper()
+            raw_stripped = raw.strip()
+            # Template helper rows (occupancy, carrier labels) start with '**'
+            if raw_stripped.startswith("**"):
+                return None
+            s = raw_stripped.replace("*", "").upper()
             if not s or s in {"-", "TBD"}:
                 return None
             # Split on common connectors and pick the first non-placeholder token
@@ -3824,45 +4359,145 @@ def export_schedule_excel(week_id: int):
                 if token and token not in {"-", "TBD"}:
                     return token
             return None
-        
-        # Front Desk employees (rows 5-22)
-        for row in range(5, 23):
-            name_cell = ws[f'D{row}']
-            primary = _primary_name_from_cell(name_cell.value)
-            if primary:
-                employee_rows[primary] = {"row": row, "section": "Front Desk"}
-        
-        # Shuttle employees (rows 24-35)
-        for row in range(24, 36):
-            name_cell = ws[f'D{row}']
-            primary = _primary_name_from_cell(name_cell.value)
-            if primary:
-                employee_rows[primary] = {"row": row, "section": "Shuttle"}
-        
-        # Breakfast Bar employees (rows 37-42)
-        for row in range(37, 43):
-            name_cell = ws[f'D{row}']
-            primary = _primary_name_from_cell(name_cell.value)
-            if primary:
-                employee_rows[primary] = {"row": row, "section": "Breakfast Bar"}
 
-        # Maintenance employees (dynamic range following "Maintenance" header)
-        maint_start_row: Optional[int] = None
+        def _is_blank_slot(value: Any) -> bool:
+            if value is None:
+                return True
+            if not isinstance(value, str):
+                return False
+            stripped = value.strip()
+            return stripped == "" or stripped in {"-", "—"}
+
+        section_aliases = {
+            "front desk": "Front Desk",
+            "frontdesk": "Front Desk",
+            "shuttle": "Shuttle",
+            "shuttle drivers": "Shuttle",
+            "breakfast bar": "Breakfast Bar",
+            "maintenance": "Maintenance",
+        }
+        tracked_sections = set(section_aliases.values())
+        current_section: Optional[str] = None
+
+        def _section_block(name: str) -> dict[str, Any]:
+            return section_blocks.setdefault(
+                name,
+                {
+                    "blank_rows": [],
+                    "end_row": None,
+                    "template_row": None,
+                },
+            )
+
         for row in range(1, ws.max_row + 1):
-            label = ws[f'A{row}'].value
-            if isinstance(label, str) and label.strip().lower() == "maintenance":
-                maint_start_row = row
-                break
-        if maint_start_row:
-            for row in range(maint_start_row, ws.max_row + 1):
-                next_label = ws[f'A{row}'].value
-                if row != maint_start_row and isinstance(next_label, str) and next_label.strip():
-                    # Reached the next labeled section such as "Manager"; stop capturing Maintenance names
+            label_val = ws[f'A{row}'].value
+            if isinstance(label_val, str):
+                normalized_label = label_val.strip().lower()
+                if normalized_label in section_aliases:
+                    # close out previous section boundaries if necessary
+                    if current_section and current_section != section_aliases[normalized_label]:
+                        block = _section_block(current_section)
+                        if block.get("end_row") is None:
+                            block["end_row"] = row
+                    current_section = section_aliases[normalized_label]
+                elif normalized_label:
+                    if current_section:
+                        block = _section_block(current_section)
+                        if block.get("end_row") is None:
+                            block["end_row"] = row
+                    current_section = None
+            if current_section not in tracked_sections:
+                continue
+            block = _section_block(current_section)
+            name_cell = ws[f'D{row}']
+            primary = _primary_name_from_cell(name_cell.value)
+            if primary:
+                employee_rows[primary] = {"row": row, "section": current_section}
+                if block.get("template_row") is None:
+                    block["template_row"] = row
+            elif _is_blank_slot(name_cell.value):
+                block["blank_rows"].append(row)
+        # Ensure end boundaries for any trailing sections
+        for block in section_blocks.values():
+            if block.get("end_row") is None:
+                block["end_row"] = ws.max_row + 1
+
+        def _clone_row_style(src_row: int, dest_row: int) -> None:
+            if src_row < 1 or dest_row < 1 or src_row > ws.max_row:
+                return
+            for col_idx in range(4, min(ws.max_column, 11) + 1):
+                src_cell = ws.cell(row=src_row, column=col_idx)
+                dest_cell = ws.cell(row=dest_row, column=col_idx)
+                dest_cell.value = None
+                if src_cell.has_style:
+                    dest_cell.font = copy_style(src_cell.font)
+                    dest_cell.border = copy_style(src_cell.border)
+                    dest_cell.fill = copy_style(src_cell.fill)
+                    dest_cell.number_format = src_cell.number_format
+                    dest_cell.alignment = copy_style(src_cell.alignment)
+            src_dim = ws.row_dimensions.get(src_row)
+            if src_dim and src_dim.height:
+                ws.row_dimensions[dest_row].height = src_dim.height
+
+        def _ensure_employee_row(section_name: str, employee_key: str, display_name: str) -> Optional[int]:
+            existing = employee_rows.get(employee_key)
+            if existing and existing["section"] == section_name:
+                return existing["row"]
+
+            block = section_blocks.get(section_name)
+            if not block:
+                return None
+
+            if block["blank_rows"]:
+                row_num = block["blank_rows"].pop(0)
+            else:
+                insert_at = block.get("end_row") or (ws.max_row + 1)
+                ws.insert_rows(insert_at)
+                template_row = block.get("template_row")
+                reference_row = template_row or max(insert_at - 1, 1)
+                if reference_row and reference_row != insert_at:
+                    _clone_row_style(reference_row, insert_at)
+                # Shift tracked rows beneath the insertion point
+                for info in employee_rows.values():
+                    if info["row"] >= insert_at:
+                        info["row"] += 1
+                for other_block in section_blocks.values():
+                    other_block["blank_rows"] = [
+                        r + 1 if r >= insert_at else r for r in other_block["blank_rows"]
+                    ]
+                    end_row = other_block.get("end_row")
+                    if end_row and end_row >= insert_at:
+                        other_block["end_row"] = end_row + 1
+                row_num = insert_at
+                block["end_row"] = (block.get("end_row") or insert_at) + 1
+
+            ws[f'D{row_num}'] = display_name.upper()
+            block["template_row"] = block.get("template_row") or row_num
+            employee_rows[employee_key] = {"row": row_num, "section": section_name}
+            return row_num
+
+        def _normalize_label_cell(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            cleaned = "".join(ch for ch in value.upper() if ch.isalnum())
+            return cleaned or None
+
+        occupancy_row: Optional[int] = None
+        crew_row_map: dict[str, int] = {}
+        carrier_label_map = {carrier: _normalize_label_cell(carrier) for carrier in carriers}
+        for row in range(1, ws.max_row + 1):
+            normalized = _normalize_label_cell(ws[f'D{row}'].value)
+            if not normalized:
+                continue
+            if normalized in {"OCC", "OCCUPANCY"} and occupancy_row is None:
+                occupancy_row = row
+                continue
+            for carrier, carrier_norm in carrier_label_map.items():
+                if not carrier_norm:
+                    continue
+                if normalized == carrier_norm or carrier_norm.startswith(normalized) or normalized.startswith(carrier_norm):
+                    crew_row_map.setdefault(carrier, row)
                     break
-                name_cell = ws[f'D{row}']
-                primary = _primary_name_from_cell(name_cell.value)
-                if primary:
-                    employee_rows[primary] = {"row": row, "section": "Maintenance"}
         
         # Build map of employee -> primary section name (for cross-role tagging)
         emp_primary: dict[str, str] = {}
@@ -3922,50 +4557,88 @@ def export_schedule_excel(week_id: int):
             assignments = section["assignments"]
             
             for employee_name, employee_assignments in assignments.items():
-                # Find the employee in our mapping
                 employee_key = employee_name.upper()
-                if employee_key in employee_rows and employee_rows[employee_key]["section"] == section_name:
-                    row_num = employee_rows[employee_key]["row"]
-                    
-                    # Fill in the shifts for each day (columns E-K)
-                    for i, date_info in enumerate(dates):
-                        col_letter = get_column_letter(5 + i)  # Start from column E (5)
-                        date_key = date_info["key"]
-                        shift_value = employee_assignments[date_key]
+                row_num = _ensure_employee_row(section_name, employee_key, employee_name)
+                if not row_num:
+                    continue
 
-                        # For time-off, show as request type based on Vacation toggle
-                        if shift_value in TIME_OFF_VALUES:
-                            is_dismissed = date_key in (dismissed_days.get(employee_name, set()) or set())
-                            is_vac = date_key in (vacation_days.get(employee_name, set()) or set())
-                            if shift_value == REQ_VAC_LABEL or (is_dismissed and is_vac):
-                                ws[f'{col_letter}{row_num}'] = "REQ VAC"
-                            else:
-                                ws[f'{col_letter}{row_num}'] = "REQ OFF"
-                            continue
+                # Fill in the shifts for each day (columns E-K)
+                for i, date_info in enumerate(dates):
+                    col_letter = get_column_letter(5 + i)  # Start from column E (5)
+                    date_key = date_info["key"]
+                    shift_value = employee_assignments[date_key]
 
-                        # Format shift display: time-only and normalized dash spacing
-                        shift_display = _normalize_shift_display(shift_value)
-                        # Front Desk export requirement: remove :00 and use hyphen
-                        # Apply FD time formatting if the shift itself is a Front Desk shift,
-                        # regardless of which section row we're writing into.
-                        if shift_section_of(shift_value) == "Front Desk":
-                            # collapse ":00am/pm" -> "am/pm"
-                            shift_display = re.sub(r":00(?=(am|pm))", "", shift_display)
-                            # use hyphen instead of en dash
-                            shift_display = shift_display.replace("–", "-")
-                            # normalize spacing around hyphen
-                            shift_display = re.sub(r"\s*-\s*", " - ", shift_display)
+                    if shift_value is None or (isinstance(shift_value, str) and not shift_value.strip()):
+                        ws[f'{col_letter}{row_num}'] = "-"
+                        continue
+                    if isinstance(shift_value, str) and shift_value.strip() == "-":
+                        ws[f'{col_letter}{row_num}'] = "-"
+                        continue
 
-                        # If the shift belongs to a different section than the employee's primary,
-                        # append a role tag like "(FD)" at the end.
-                        emp_primary_role = emp_primary.get(employee_key)
-                        shift_role = shift_section_of(shift_value)
-                        if emp_primary_role and shift_role and shift_role != emp_primary_role:
-                            tag = role_abbrev.get(shift_role, shift_role)
-                            shift_display = f"{shift_display} ({tag})"
+                    # For time-off, show as request type based on Vacation toggle
+                    if shift_value in TIME_OFF_VALUES:
+                        is_dismissed = date_key in (dismissed_days.get(employee_name, set()) or set())
+                        is_vac = date_key in (vacation_days.get(employee_name, set()) or set())
+                        if shift_value == REQ_VAC_LABEL or (is_dismissed and is_vac):
+                            ws[f'{col_letter}{row_num}'] = "REQ VAC"
+                        else:
+                            ws[f'{col_letter}{row_num}'] = "REQ OFF"
+                        continue
 
-                        # Set the cell value
-                        ws[f'{col_letter}{row_num}'] = shift_display
+                    # Format shift display: time-only and normalized dash spacing
+                    shift_display = _normalize_shift_display(shift_value)
+                    # Front Desk export requirement: remove :00 and use hyphen
+                    # Apply FD time formatting if the shift itself is a Front Desk shift,
+                    # regardless of which section row we're writing into.
+                    if shift_section_of(shift_value) == "Front Desk":
+                        # collapse ":00am/pm" -> "am/pm"
+                        shift_display = re.sub(r":00(?=(am|pm))", "", shift_display)
+                        # use hyphen instead of en dash
+                        shift_display = shift_display.replace("–", "-")
+                        # normalize spacing around hyphen
+                        shift_display = re.sub(r"\s*-\s*", " - ", shift_display)
+
+                    # If the shift belongs to a different section than the employee's primary,
+                    # append a role tag like "(FD)" at the end.
+                    emp_primary_role = emp_primary.get(employee_key)
+                    shift_role = shift_section_of(shift_value)
+                    if emp_primary_role and shift_role and shift_role != emp_primary_role:
+                        tag = role_abbrev.get(shift_role, shift_role)
+                        shift_display = f"{shift_display} ({tag})"
+
+                    # Set the cell value
+                    ws[f'{col_letter}{row_num}'] = shift_display
+
+        if occupancy_row is not None:
+            for i, date_info in enumerate(dates):
+                col_letter = get_column_letter(5 + i)
+                cell = ws[f'{col_letter}{occupancy_row}']
+                value = occupancy_values.get(date_info["key"])
+                if value is None:
+                    cell.value = None
+                else:
+                    cell.value = value
+                    if cell.number_format in ("General", "", None):
+                        cell.number_format = '0"%"'
+
+        if crew_row_map:
+            for carrier, row_num in crew_row_map.items():
+                per_day = carrier_arrivals.get(carrier) or {}
+                for i, date_info in enumerate(dates):
+                    col_letter = get_column_letter(5 + i)
+                    cell = ws[f'{col_letter}{row_num}']
+                    times = per_day.get(date_info["key"]) or []
+                    if not times:
+                        cell.value = None
+                        continue
+                    formatted_times = " / ".join(_format_aircrew_time_display(t) for t in sorted(times))
+                    cell.value = formatted_times
+                    existing_alignment = cell.alignment or Alignment()
+                    cell.alignment = Alignment(
+                        horizontal=existing_alignment.horizontal or "left",
+                        vertical=existing_alignment.vertical or "top",
+                        wrap_text=False,
+                    )
         
         # Save to BytesIO
         output = io.BytesIO()

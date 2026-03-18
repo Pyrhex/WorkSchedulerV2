@@ -239,10 +239,25 @@ body {
 
 .week-nav { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 16px 0; }
 .week-label { text-align: center; color: var(--muted); font-weight: 600; }
+.template-panel { background: var(--card); border: 1px solid var(--grid); border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; box-shadow: var(--shadow); }
+.template-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.template-panel-title { font-weight: 700; font-size: 15px; }
+.template-panel-subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.template-panel-note { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
+.template-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+.template-slot { border: 1px solid var(--grid); border-radius: 8px; padding: 10px 12px; background: var(--surface-soft); display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: auto; box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.16); }
+.template-slot[data-has-data="0"] { border-style: dashed; opacity: 0.95; }
+.template-slot.busy { opacity: 0.6; }
+.template-slot-header { flex: 1; min-width: 0; }
+.template-slot-name { font-weight: 600; font-size: 14px; }
+.template-slot-status { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.template-slot-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.template-slot-actions .btn { flex: 0; min-width: auto; padding-left: 10px; padding-right: 10px; }
 
 .tables { display: grid; gap: 16px; }
 .table-card { background: var(--card); border: 1px solid var(--grid); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
 .table-title { font-weight: 700; padding: 12px 16px; border-bottom: 1px solid var(--grid); background: var(--surface-soft); }
+.table-title.occupancy-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .table-hint { padding: 8px 16px 0; font-size: 12px; color: var(--muted); }
 
 .employee-row { cursor: grab; transition: background 0.15s ease, box-shadow 0.15s ease; }
@@ -357,66 +372,6 @@ html.dark-mode .aircrew-chip {
   color: var(--primary);
   background: transparent;
   transform: scale(1.05);
-}
-.aircrew-import-card { padding: 16px; }
-.aircrew-import-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-.aircrew-import-title { font-weight: 700; font-size: 16px; }
-.aircrew-import-hint { margin: 4px 0 0; color: var(--muted); font-size: 13px; max-width: 520px; }
-.aircrew-import-form { margin-top: 16px; display: flex; flex-direction: column; gap: 12px; }
-.aircrew-import-dropzone {
-  border: 2px dashed var(--grid);
-  border-radius: 10px;
-  padding: 16px;
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  cursor: pointer;
-  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
-}
-.aircrew-import-dropzone:hover {
-  border-color: var(--primary);
-  background: rgba(37, 99, 235, 0.04);
-  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.1);
-}
-.aircrew-import-dropzone input[type="file"] {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-.aircrew-import-dropzone-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  background: var(--surface-soft);
-  border: 1px solid var(--grid);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  color: var(--primary);
-}
-.aircrew-import-dropzone-text { display: flex; flex-direction: column; gap: 4px; }
-.aircrew-import-dropzone-title { font-weight: 600; }
-.aircrew-import-dropzone-subtitle { font-size: 13px; color: var(--muted); }
-.aircrew-import-field { display: flex; flex-direction: column; gap: 4px; max-width: 320px; }
-.aircrew-import-field label { font-weight: 600; font-size: 13px; }
-.aircrew-import-field select {
-  border: 1px solid var(--grid);
-  border-radius: 6px;
-  padding: 6px 8px;
-  background: var(--select-bg);
-  font-size: 14px;
-  color: var(--text);
-}
-.aircrew-import-field-hint { font-size: 12px; color: var(--muted); }
-.aircrew-import-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.aircrew-import-status { font-size: 13px; color: var(--muted); min-height: 18px; }
-.aircrew-import-status[data-state="success"] { color: var(--success); }
-.aircrew-import-status[data-state="error"] { color: var(--danger); }
-.aircrew-import-warnings { margin: 0; padding-left: 18px; color: var(--danger); font-size: 12px; }
-.aircrew-import-form[data-uploading="1"] .btn {
-  opacity: 0.7;
-  pointer-events: none;
 }
 .aircrew-wheel-modal {
   position: fixed;
@@ -564,6 +519,92 @@ html.dark-mode .aircrew-chip {
 body.aircrew-wheel-open {
   overflow: hidden;
 }
+
+.occupancy-table .row.header .cell.head { justify-content: center; align-items: center; }
+.occupancy-actions { display: flex; align-items: center; gap: 8px; }
+.occupancy-upload-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--grid);
+  background: var(--select-bg);
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+.occupancy-upload-btn:hover,
+.occupancy-upload-btn:focus {
+  border-color: var(--primary);
+  color: var(--primary);
+  transform: translateY(-1px);
+}
+.occupancy-upload-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+.occupancy-upload-status {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 80px;
+  text-align: right;
+}
+.occupancy-upload-status[data-state="success"] { color: var(--success); }
+.occupancy-upload-status[data-state="error"] { color: var(--danger); }
+.occupancy-upload-status[data-state="info"] { color: var(--blue); }
+.occupancy-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 80px;
+  justify-content: center;
+}
+.occupancy-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--grid);
+  background: var(--select-bg);
+  border-radius: 8px;
+  padding: 6px 10px;
+  width: 100%;
+  max-width: 120px;
+}
+.occupancy-cell.empty .occupancy-input-wrap {
+  border-style: dashed;
+  color: var(--muted);
+}
+.occupancy-input {
+  border: none;
+  width: 72px;
+  font-size: 16px;
+  font-weight: 600;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+}
+.occupancy-input::placeholder {
+  color: var(--muted);
+  font-weight: 500;
+}
+.occupancy-input:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.occupancy-input-suffix {
+  font-size: 14px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.occupancy-cell-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 
 /* Keep white text when disabled and slightly reduce intensity */
 .shift-select:disabled.select-green,

@@ -1,6 +1,7 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
+const CUSTOM_SHIFT_VALUE = '__custom__';
 
 function ensureTimeOffOptions(selectEl) {
   if (![...selectEl.options].some(o => o.value === 'TIME OFF')) {
@@ -360,15 +361,40 @@ function initShuttleSuggestions() {
 
 function wireShiftSelects() {
   document.querySelectorAll('.shift-select').forEach(sel => {
+    sel.dataset.prevValue = sel.value;
     applySuggestionOptionState(sel, 'selected');
-    sel.addEventListener('focus', () => applySuggestionOptionState(sel, 'menu'));
+    sel.addEventListener('focus', () => {
+      applySuggestionOptionState(sel, 'menu');
+      sel.dataset.prevValue = sel.value;
+    });
     sel.addEventListener('blur', () => applySuggestionOptionState(sel, 'selected'));
     sel.addEventListener('change', async (e) => {
       const cell = sel.closest('.cell');
       const section = cell.getAttribute('data-section');
       const employee = cell.getAttribute('data-employee');
       const dateKey = cell.getAttribute('data-date');
-      const value = sel.value;
+      const previousValue = sel.dataset.prevValue || 'Set';
+      let value = sel.value;
+      if (sel.dataset.allowCustom === '1' && value === CUSTOM_SHIFT_VALUE) {
+        const custom = window.prompt('Enter the time window (e.g., 5:30am - 1:30pm)');
+        if (!custom || !custom.trim()) {
+          sel.value = previousValue;
+          applySuggestionOptionState(sel, 'selected');
+          return;
+        }
+        const cleaned = custom.trim();
+        let existing = Array.from(sel.options).find(opt => opt.value === cleaned);
+        if (!existing) {
+          existing = document.createElement('option');
+          existing.value = cleaned;
+          existing.textContent = cleaned;
+          existing.dataset.custom = '1';
+          sel.appendChild(existing);
+        }
+        value = cleaned;
+        sel.value = cleaned;
+        updateSelectClass(sel, section, value);
+      }
       try {
         const res = await fetch('/assign', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -394,10 +420,19 @@ function wireShiftSelects() {
         updateConflictsUI();
         showToast('Saved');
         applySuggestionOptionState(sel, 'selected');
+        if (previousValue !== value) {
+          const prevOption = Array.from(sel.options).find(opt => opt.value === previousValue && opt.dataset.custom === '1');
+          if (prevOption) {
+            prevOption.remove();
+          }
+        }
+        sel.dataset.prevValue = value;
       } catch (err) {
         console.error(err);
         const message = err && typeof err.message === 'string' && err.message.trim() ? err.message : 'Save failed';
         showToast(message);
+        sel.value = previousValue;
+        updateSelectClass(sel, section, sel.value);
         applySuggestionOptionState(sel, 'selected');
       }
     });
@@ -624,6 +659,185 @@ function applyAircrewCells(carrier, cells) {
   updatedDates.forEach(updateShuttleSuggestionForDate);
 }
 
+function renderOccupancyCell(cell, value) {
+  if (!cell) return;
+  const input = cell.querySelector('.occupancy-input');
+  const hint = cell.querySelector('.occupancy-cell-hint');
+  let cleaned = '';
+  if (value !== null && value !== undefined && !Number.isNaN(Number(value))) {
+    const pct = Math.max(0, Math.min(100, Math.round(Number(value))));
+    cleaned = String(pct);
+  }
+  if (input) {
+    input.value = cleaned;
+  }
+  if (hint) {
+    hint.textContent = cleaned ? `Saved ${cleaned}%` : 'Not set';
+  }
+  if (cleaned) {
+    cell.dataset.value = cleaned;
+    cell.classList.remove('empty');
+  } else {
+    delete cell.dataset.value;
+    cell.classList.add('empty');
+  }
+}
+
+function applyOccupancyCells(cells) {
+  if (!cells) return;
+  Object.entries(cells).forEach(([dateKey, value]) => {
+    const cell = document.querySelector(`.occupancy-cell[data-date="${dateKey}"]`);
+    if (cell) {
+      renderOccupancyCell(cell, value);
+    }
+  });
+}
+
+async function postOccupancyUpdate(dateKey, value) {
+  if (!window.currentWeekId) {
+    throw new Error('Week not found');
+  }
+  const payload = {
+    date: dateKey,
+    value: value === null || value === undefined ? null : value,
+    week_id: window.currentWeekId,
+  };
+  const res = await fetch('/occupancy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || 'Unable to update occupancy');
+  }
+  return data;
+}
+
+function wireOccupancyInputs() {
+  const inputs = document.querySelectorAll('.occupancy-input');
+  if (!inputs.length) return;
+  inputs.forEach(input => {
+    const cell = input.closest('.occupancy-cell');
+    if (!cell) return;
+    const dateKey = cell.getAttribute('data-date');
+    if (!dateKey) return;
+
+    const setBusy = (busy) => {
+      if (busy) {
+        input.setAttribute('disabled', 'disabled');
+      } else {
+        input.removeAttribute('disabled');
+      }
+    };
+
+    const saveValue = async () => {
+      const raw = input.value.trim();
+      let value = null;
+      if (raw !== '') {
+        const num = Number(raw);
+        if (Number.isNaN(num)) {
+          showToast('Enter a number between 0 and 100');
+          renderOccupancyCell(cell, cell.dataset.value || null);
+          return;
+        }
+        value = Math.max(0, Math.min(100, Math.round(num)));
+        if (String(value) !== raw) {
+          input.value = String(value);
+        }
+      }
+      if (cell.dataset.saving === '1') return;
+      cell.dataset.saving = '1';
+      setBusy(true);
+      try {
+        const data = await postOccupancyUpdate(dateKey, value);
+        renderOccupancyCell(cell, data.value);
+        showToast(value === null ? 'Occupancy cleared' : 'Occupancy updated');
+      } catch (err) {
+        console.error(err);
+        const message = err && err.message ? err.message : 'Unable to update occupancy';
+        showToast(message);
+      } finally {
+        delete cell.dataset.saving;
+        setBusy(false);
+      }
+    };
+
+    input.addEventListener('change', saveValue);
+    input.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter') {
+        evt.preventDefault();
+        saveValue();
+      }
+    });
+  });
+}
+
+function wireOccupancyUpload() {
+  const trigger = document.getElementById('occupancy-upload-trigger');
+  const input = document.getElementById('occupancy-upload-input');
+  const status = document.getElementById('occupancy-upload-status');
+  if (!trigger || !input) return;
+
+  const setStatus = (text, state) => {
+    if (!status) return;
+    if (state) {
+      status.setAttribute('data-state', state);
+    } else {
+      status.removeAttribute('data-state');
+    }
+    status.textContent = text || '';
+  };
+
+  const resetInputs = () => {
+    input.value = '';
+    input.disabled = false;
+    trigger.disabled = false;
+  };
+
+  trigger.addEventListener('click', () => {
+    if (trigger.disabled) return;
+    input.click();
+  });
+
+  input.addEventListener('change', async () => {
+    if (!input.files || !input.files.length) return;
+    const file = input.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+    if (window.currentWeekId) {
+      formData.append('week_id', window.currentWeekId);
+    }
+    trigger.disabled = true;
+    input.disabled = true;
+    setStatus('Uploading…', 'info');
+    try {
+      const res = await fetch('/occupancy/import', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || 'Upload failed');
+      }
+      if (data.week_cells) {
+        applyOccupancyCells(data.week_cells);
+      }
+      const message = data.message || `Updated ${data.updated_cells || 0} days`;
+      setStatus('Upload complete', 'success');
+      showToast(message);
+    } catch (err) {
+      console.error(err);
+      const msg = err && err.message ? err.message : 'Upload failed';
+      setStatus(msg, 'error');
+      showToast(msg);
+    } finally {
+      resetInputs();
+      setTimeout(() => setStatus('', ''), 4000);
+    }
+  });
+}
+
 function convertWheelSelectionTo24(selection) {
   if (!selection) return '18:00';
   let hour = Number(selection.hour);
@@ -837,113 +1051,6 @@ function wireAircrewArrivals() {
   });
 }
 
-function wireAircrewImportForm() {
-  const form = document.getElementById('aircrew-import-form');
-  if (!form) return;
-  const fileInput = form.querySelector('#aircrew-import-file');
-  const statusEl = form.querySelector('.aircrew-import-status');
-  const warningsList = form.querySelector('.aircrew-import-warnings');
-  const dropzoneTitle = form.querySelector('.aircrew-import-dropzone-title');
-  const dropzoneSubtitle = form.querySelector('.aircrew-import-dropzone-subtitle');
-  const defaultTitle = dropzoneTitle ? dropzoneTitle.textContent : '';
-  const defaultSubtitle = dropzoneSubtitle ? dropzoneSubtitle.textContent : '';
-
-  const setStatus = (state, text) => {
-    if (!statusEl) return;
-    if (state) {
-      statusEl.setAttribute('data-state', state);
-    } else {
-      statusEl.removeAttribute('data-state');
-    }
-    statusEl.textContent = text || '';
-  };
-
-  const renderWarnings = (items) => {
-    if (!warningsList) return;
-    const list = Array.isArray(items) ? items.filter(Boolean) : [];
-    warningsList.innerHTML = '';
-    if (!list.length) {
-      warningsList.hidden = true;
-      return;
-    }
-    list.forEach(item => {
-      const li = document.createElement('li');
-      li.textContent = item;
-      warningsList.appendChild(li);
-    });
-    warningsList.hidden = false;
-  };
-
-  const resetFileLabel = () => {
-    if (dropzoneTitle) dropzoneTitle.textContent = defaultTitle;
-    if (dropzoneSubtitle) dropzoneSubtitle.textContent = defaultSubtitle;
-  };
-
-  fileInput?.addEventListener('change', () => {
-    if (!fileInput) return;
-    if (fileInput.files && fileInput.files.length > 0) {
-      if (dropzoneTitle) {
-        dropzoneTitle.textContent = fileInput.files[0].name;
-      }
-      if (dropzoneSubtitle) {
-        dropzoneSubtitle.textContent = 'Ready to upload';
-      }
-    } else {
-      resetFileLabel();
-    }
-  });
-
-  form.addEventListener('submit', async (evt) => {
-    evt.preventDefault();
-    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-      setStatus('error', 'Select an Excel file first.');
-      return;
-    }
-    const formData = new FormData(form);
-    form.dataset.uploading = '1';
-    setStatus('info', 'Uploading…');
-    renderWarnings([]);
-    try {
-      const res = await fetch('/aircrew/import', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || 'Upload failed');
-      }
-      if (data.week_cells) {
-        Object.entries(data.week_cells).forEach(([carrier, cells]) => {
-          applyAircrewCells(carrier, cells);
-        });
-      }
-      const carriersOnPage = new Set();
-      document.querySelectorAll('.aircrew-table .cell[data-carrier]').forEach(cell => {
-        const name = cell.getAttribute('data-carrier');
-        if (name) carriersOnPage.add(name);
-      });
-      const touched = Array.isArray(data.touched_carriers) ? data.touched_carriers : [];
-      const missingCarriers = touched.filter(name => name && !carriersOnPage.has(name));
-      const extraWarnings = missingCarriers.length
-        ? [`New carrier${missingCarriers.length > 1 ? 's' : ''} (${missingCarriers.join(', ')}) were added. Reload to see their rows.`]
-        : [];
-      renderWarnings([...(data.warnings || []), ...extraWarnings]);
-      setStatus('success', data.message || 'Aircrew arrivals updated.');
-      showToast('Aircrew schedule uploaded');
-    } catch (err) {
-      console.error(err);
-      const message = err && err.message ? err.message : 'Upload failed';
-      setStatus('error', message);
-      showToast(message);
-    } finally {
-      delete form.dataset.uploading;
-      if (fileInput) {
-        fileInput.value = '';
-      }
-      resetFileLabel();
-    }
-  });
-}
 
 function initLiveUpdates() {
   try {
@@ -975,6 +1082,17 @@ function initLiveUpdates() {
           }
           updateShuttleSuggestionForDate(item.date);
         });
+      } else if (payload?.type === 'occupancy') {
+        if (payload.week_id && window.currentWeekId && Number(payload.week_id) !== Number(window.currentWeekId)) {
+          return;
+        }
+        const entries = Array.isArray(payload.items) ? payload.items : [payload];
+        const cells = {};
+        entries.forEach(item => {
+          if (!item || !item.date) return;
+          cells[item.date] = item.value;
+        });
+        applyOccupancyCells(cells);
       }
     });
   } catch (e) {
@@ -1282,6 +1400,113 @@ function wireEmployeeSecondaryRoles() {
   });
 }
 
+function templateSlotStatusLabel(slotData) {
+  if (!slotData || !slotData.has_data) {
+    return 'Empty slot';
+  }
+  const weekLabel = slotData.saved_week_label || 'week';
+  if (slotData.updated_label) {
+    return `Saved from ${weekLabel} • ${slotData.updated_label}`;
+  }
+  return `Saved from ${weekLabel}`;
+}
+
+function applyTemplateSlotState(slotEl, slotData) {
+  if (!slotEl || !slotData) return;
+  slotEl.setAttribute('data-has-data', slotData.has_data ? '1' : '0');
+  if (slotData.saved_week_label) {
+    slotEl.setAttribute('data-week-label', slotData.saved_week_label);
+  } else {
+    slotEl.removeAttribute('data-week-label');
+  }
+  if (slotData.updated_label) {
+    slotEl.setAttribute('data-updated-label', slotData.updated_label);
+  } else {
+    slotEl.removeAttribute('data-updated-label');
+  }
+  const status = slotEl.querySelector('[data-slot-status]');
+  if (status) {
+    status.textContent = templateSlotStatusLabel(slotData);
+  }
+  const loadBtn = slotEl.querySelector('.template-slot-load');
+  if (loadBtn) {
+    loadBtn.disabled = !slotData.has_data;
+  }
+}
+
+function setTemplateSlotBusy(slotEl, busy) {
+  if (!slotEl) return;
+  slotEl.classList.toggle('busy', !!busy);
+  slotEl.querySelectorAll('button').forEach(btn => {
+    if (busy) {
+      btn.setAttribute('disabled', 'disabled');
+    } else {
+      btn.removeAttribute('disabled');
+      if (btn.classList.contains('template-slot-load')) {
+        const hasData = slotEl.getAttribute('data-has-data') === '1';
+        if (!hasData) {
+          btn.setAttribute('disabled', 'disabled');
+        }
+      }
+    }
+  });
+}
+
+function initTemplateControls() {
+  const container = document.querySelector('[data-template-slots]');
+  if (!container) return;
+
+  const runAction = async (slotEl, action) => {
+    if (!slotEl || !action) return;
+    const slot = Number(slotEl.getAttribute('data-slot'));
+    if (!slot || !window.currentWeekId) {
+      showToast('Week not ready');
+      return;
+    }
+    if (action === 'load' && !window.confirm('Load this template over the selected week? Existing assignments will be replaced.')) {
+      return;
+    }
+    setTemplateSlotBusy(slotEl, true);
+    try {
+      const res = await fetch(`/schedule-templates/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slot, week_id: window.currentWeekId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || 'Request failed');
+      }
+      if (data.slot) {
+        applyTemplateSlotState(slotEl, data.slot);
+      }
+      if (action === 'save') {
+        showToast('Template saved');
+      } else {
+        showToast('Template applied');
+        setTimeout(() => window.location.reload(), 600);
+      }
+    } catch (err) {
+      console.error(err);
+      const message = err && err.message ? err.message : 'Unable to update template';
+      showToast(message);
+    } finally {
+      setTemplateSlotBusy(slotEl, false);
+    }
+  };
+
+  container.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const slotEl = btn.closest('.template-slot');
+      if (!slotEl) return;
+      const action = btn.getAttribute('data-action');
+      if (!action) return;
+      if (action === 'load' && btn.disabled) return;
+      runAction(slotEl, action);
+    });
+  });
+}
+
 // Make functions globally available
 window.confirmGenerateSchedule = confirmGenerateSchedule;
 
@@ -1302,5 +1527,7 @@ document.addEventListener('DOMContentLoaded', () => {
   aircrewWheel = initAircrewWheelPicker();
   window.aircrewWheel = aircrewWheel;
   wireAircrewArrivals();
-  wireAircrewImportForm();
+  wireOccupancyInputs();
+  wireOccupancyUpload();
+  initTemplateControls();
 });

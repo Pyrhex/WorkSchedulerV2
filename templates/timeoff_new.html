@@ -19,6 +19,14 @@
                 {% endfor %}
               </datalist>
             </label>
+            <label>
+              <div style="font-weight:600; margin-bottom:6px;">Role</div>
+              <select name="role" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;">
+                {% for sec in sections %}
+                  <option value="{{ sec.name }}">{{ sec.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
               <label>
                 <div style="font-weight:600; margin-bottom:6px;">From</div>
