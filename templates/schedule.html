@@ -23,6 +23,7 @@
         <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/delete{% else %}/delete{% endif %}" method="post" onsubmit="return confirm('Delete this schedule?');">
           <button class="btn danger" type="submit">Delete This Schedule</button>
         </form>
+        <button type="button" class="btn outline-primary" id="whatsapp-paste-trigger">Send WhatsApp Image</button>
       </div>
       <div class="subtitle">{{ meta.fd_note }}</div>
     </section>
@@ -393,6 +394,37 @@
       </div>
       {% endif %}
     </section>
+  </div>
+
+  <div class="whatsapp-modal" id="whatsapp-paste-modal" aria-hidden="true">
+    <div class="whatsapp-overlay" data-action="close-whatsapp"></div>
+    <div class="whatsapp-dialog" role="dialog" aria-modal="true" aria-labelledby="whatsapp-modal-title">
+      <div class="whatsapp-card">
+        <div class="whatsapp-card-header">
+          <div>
+            <div class="whatsapp-card-title" id="whatsapp-modal-title">Send Image to WhatsApp</div>
+            <div class="whatsapp-card-subtitle">Paste with Ctrl/Cmd+V or drag an image. We’ll send it to the configured WhatsApp number.</div>
+          </div>
+          <button type="button" class="whatsapp-close" data-action="close-whatsapp" aria-label="Close">×</button>
+        </div>
+        <div class="whatsapp-dropzone" data-dropzone tabindex="0" aria-label="Paste or drop an image">
+          <div class="whatsapp-dropzone-hint">
+            <span class="hint-title">Paste or drop an image</span>
+            <span class="hint-subtitle">PNG, JPG, or WEBP up to 8&nbsp;MB</span>
+          </div>
+          <img data-preview alt="Image preview" hidden>
+        </div>
+        <label class="whatsapp-caption">
+          <span>Optional caption</span>
+          <textarea rows="2" data-caption placeholder="Add a short note…"></textarea>
+        </label>
+        <div class="whatsapp-feedback" data-feedback role="status" aria-live="polite"></div>
+        <div class="whatsapp-actions">
+          <button type="button" class="btn ghost" data-action="clear-image" disabled>Clear</button>
+          <button type="button" class="btn primary" data-action="send-whatsapp" disabled>Send to WhatsApp</button>
+        </div>
+      </div>
+    </div>
   </div>
 {% endblock %}
 

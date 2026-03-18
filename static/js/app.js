@@ -1509,6 +1509,234 @@ function initTemplateControls() {
   });
 }
 
+function initWhatsappPasteModal() {
+  const trigger = document.getElementById('whatsapp-paste-trigger');
+  const modal = document.getElementById('whatsapp-paste-modal');
+  if (!trigger || !modal) return;
+
+  const dropzone = modal.querySelector('[data-dropzone]');
+  const previewImg = modal.querySelector('[data-preview]');
+  const captionInput = modal.querySelector('[data-caption]');
+  const feedbackEl = modal.querySelector('[data-feedback]');
+  const sendBtn = modal.querySelector('[data-action="send-whatsapp"]');
+  const clearBtn = modal.querySelector('[data-action="clear-image"]');
+  const closeButtons = modal.querySelectorAll('[data-action="close-whatsapp"]');
+  const MAX_BYTES = 8 * 1024 * 1024;
+  let currentFile = null;
+  let objectUrl = null;
+  let pasteListenerAttached = false;
+
+  function setFeedback(message, state) {
+    if (!feedbackEl) return;
+    feedbackEl.textContent = message || '';
+    if (state) {
+      feedbackEl.setAttribute('data-state', state);
+    } else {
+      feedbackEl.removeAttribute('data-state');
+    }
+  }
+
+  function resetPreview() {
+    currentFile = null;
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+    }
+    if (previewImg) {
+      previewImg.src = '';
+      previewImg.setAttribute('hidden', 'hidden');
+    }
+    if (dropzone) {
+      dropzone.classList.remove('has-image', 'dragover');
+    }
+    if (sendBtn) {
+      sendBtn.disabled = true;
+    }
+    if (clearBtn) {
+      clearBtn.disabled = true;
+    }
+    setFeedback('', null);
+  }
+
+  function closeModal() {
+    modal.setAttribute('aria-hidden', 'true');
+    detachPasteListener();
+    resetPreview();
+    if (captionInput) {
+      captionInput.value = '';
+    }
+    document.removeEventListener('keydown', onKeydown, true);
+  }
+
+  function openModal() {
+    modal.setAttribute('aria-hidden', 'false');
+    if (dropzone) {
+      dropzone.focus();
+    }
+    attachPasteListener();
+    document.addEventListener('keydown', onKeydown, true);
+    setFeedback('Paste with Ctrl/Cmd+V or drop an image.', 'info');
+  }
+
+  function onKeydown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeModal();
+    }
+  }
+
+  function attachPasteListener() {
+    if (pasteListenerAttached) return;
+    window.addEventListener('paste', handlePasteEvent);
+    pasteListenerAttached = true;
+  }
+
+  function detachPasteListener() {
+    if (!pasteListenerAttached) return;
+    window.removeEventListener('paste', handlePasteEvent);
+    pasteListenerAttached = false;
+  }
+
+  function handleFiles(fileList) {
+    if (!fileList || fileList.length === 0) {
+      setFeedback('Paste an image first.', 'error');
+      return;
+    }
+    const match = Array.from(fileList).find(file => file && file.type && file.type.startsWith('image/'));
+    if (!match) {
+      setFeedback('Only image files are supported.', 'error');
+      return;
+    }
+    if (match.size > MAX_BYTES) {
+      setFeedback('Image is too large (max 8 MB).', 'error');
+      return;
+    }
+    currentFile = match;
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    objectUrl = URL.createObjectURL(match);
+    if (previewImg) {
+      previewImg.src = objectUrl;
+      previewImg.removeAttribute('hidden');
+    }
+    if (dropzone) {
+      dropzone.classList.add('has-image');
+    }
+    if (sendBtn) {
+      sendBtn.disabled = false;
+    }
+    if (clearBtn) {
+      clearBtn.disabled = false;
+    }
+    setFeedback('Ready to send.', 'info');
+  }
+
+  function handlePasteEvent(event) {
+    if (modal.getAttribute('aria-hidden') === 'true') {
+      return;
+    }
+    const files = event.clipboardData && event.clipboardData.files;
+    if (files && files.length > 0) {
+      event.preventDefault();
+      handleFiles(files);
+    }
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    if (dropzone) {
+      dropzone.classList.remove('dragover');
+    }
+    if (event.dataTransfer?.files?.length) {
+      handleFiles(event.dataTransfer.files);
+    }
+  }
+
+  function handleDragOver(event) {
+    event.preventDefault();
+    if (dropzone) {
+      dropzone.classList.add('dragover');
+    }
+  }
+
+  function handleDragLeave(event) {
+    if (dropzone && event.target === dropzone) {
+      dropzone.classList.remove('dragover');
+    }
+  }
+
+  async function sendToWhatsapp() {
+    if (!currentFile || !sendBtn) {
+      setFeedback('Paste an image first.', 'error');
+      return;
+    }
+    const formData = new FormData();
+    const filename = currentFile.name || `pasted-${Date.now()}.png`;
+    formData.append('image', currentFile, filename);
+    const caption = captionInput ? captionInput.value.trim() : '';
+    if (caption) {
+      formData.append('caption', caption);
+    }
+    if (window.currentWeekId) {
+      formData.append('week_id', window.currentWeekId);
+    }
+    const originalText = sendBtn.textContent;
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending…';
+    setFeedback('Sending to WhatsApp…', 'info');
+    try {
+      const response = await fetch('/api/whatsapp/send-image', {
+        method: 'POST',
+        body: formData,
+      });
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (err) {
+        data = null;
+      }
+      if (!response.ok || !data?.ok) {
+        const message = data?.error || 'Unable to send image.';
+        throw new Error(message);
+      }
+      setFeedback(data?.message || 'Image sent.', 'success');
+      sendBtn.textContent = 'Sent';
+      setTimeout(() => {
+        closeModal();
+      }, 1200);
+    } catch (error) {
+      console.error(error);
+      const message = error && error.message ? error.message : 'Unable to send image.';
+      setFeedback(message, 'error');
+    } finally {
+      sendBtn.disabled = false;
+      sendBtn.textContent = originalText || 'Send to WhatsApp';
+    }
+  }
+
+  if (trigger) {
+    trigger.addEventListener('click', () => {
+      openModal();
+    });
+  }
+  closeButtons.forEach(btn => {
+    btn.addEventListener('click', closeModal);
+  });
+  if (dropzone) {
+    dropzone.addEventListener('paste', handlePasteEvent);
+    dropzone.addEventListener('drop', handleDrop);
+    dropzone.addEventListener('dragover', handleDragOver);
+    dropzone.addEventListener('dragleave', handleDragLeave);
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener('click', resetPreview);
+  }
+  if (sendBtn) {
+    sendBtn.addEventListener('click', sendToWhatsapp);
+  }
+}
+
 // Make functions globally available
 window.confirmGenerateSchedule = confirmGenerateSchedule;
 
@@ -1532,4 +1760,5 @@ document.addEventListener('DOMContentLoaded', () => {
   wireOccupancyInputs();
   wireOccupancyUpload();
   initTemplateControls();
+  initWhatsappPasteModal();
 });

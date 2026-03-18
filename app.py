@@ -3,15 +3,18 @@ from __future__ import annotations
 import io
 import json
 import math
+import mimetypes
 import os
 import re
 import time
 import uuid
 from copy import copy as copy_style
 from datetime import date, datetime, time as dt_time, timedelta
+from pathlib import Path
 from random import choice, sample
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urljoin
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
@@ -27,6 +30,112 @@ load_dotenv()
 
 
 app = Flask(__name__)
+
+
+TWILIO_MESSAGES_URL_TEMPLATE = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+WHATSAPP_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
+WHATSAPP_TIMEOUT = 15  # seconds
+WHATSAPP_MEDIA_RELATIVE = Path("static/whatsapp-media")
+WHATSAPP_MEDIA_DIR = Path(app.root_path) / WHATSAPP_MEDIA_RELATIVE
+WHATSAPP_MEDIA_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+class TwilioWhatsAppError(RuntimeError):
+    """Raised when the Twilio WhatsApp API reports an error."""
+
+
+def _normalize_whatsapp_number(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if not value.startswith("whatsapp:"):
+        value = f"whatsapp:{value}"
+    return value
+
+
+def _twilio_config() -> Optional[dict[str, str]]:
+    account_sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    auth_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    from_number = _normalize_whatsapp_number(os.getenv("TWILIO_WHATSAPP_FROM") or "whatsapp:+14155238886")
+    to_number = _normalize_whatsapp_number(os.getenv("TWILIO_WHATSAPP_TO") or "")
+    media_base_url = (os.getenv("WHATSAPP_MEDIA_BASE_URL") or "").strip().rstrip("/")
+    if not account_sid or not auth_token or not to_number or not media_base_url:
+        return None
+    return {
+        "account_sid": account_sid,
+        "auth_token": auth_token,
+        "from_number": from_number,
+        "to_number": to_number,
+        "media_base_url": media_base_url,
+    }
+
+
+def _ensure_whatsapp_media_dir() -> None:
+    try:
+        WHATSAPP_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # pragma: no cover - filesystem guard
+        app.logger.warning("Unable to create WhatsApp media dir: %s", exc)
+
+
+def _cleanup_old_whatsapp_media() -> None:
+    if not WHATSAPP_MEDIA_DIR.exists():
+        return
+    cutoff = time.time() - WHATSAPP_MEDIA_MAX_AGE_SECONDS
+    for path in WHATSAPP_MEDIA_DIR.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)  # type: ignore[arg-type]
+        except Exception:
+            continue
+
+
+def _persist_whatsapp_media(file_bytes: bytes, extension: str) -> str:
+    _ensure_whatsapp_media_dir()
+    _cleanup_old_whatsapp_media()
+    safe_ext = extension if extension.startswith(".") else f".{extension}" if extension else ".bin"
+    filename = f"{int(time.time())}-{uuid.uuid4().hex}{safe_ext}"
+    target_path = WHATSAPP_MEDIA_DIR / filename
+    with open(target_path, "wb") as f:
+        f.write(file_bytes)
+    return filename
+
+
+def _build_media_url(base_url: str, filename: str) -> str:
+    normalized = base_url.rstrip("/") + "/"
+    return urljoin(normalized, filename)
+
+
+def _send_twilio_whatsapp_image(config: dict[str, str], *, media_url: str, caption: Optional[str]) -> None:
+    url = TWILIO_MESSAGES_URL_TEMPLATE.format(account_sid=config["account_sid"])
+    data = {
+        "From": config["from_number"],
+        "To": config["to_number"],
+        "MediaUrl": media_url,
+    }
+    if caption:
+        data["Body"] = caption[:1024]
+    try:
+        response = requests.post(
+            url,
+            data=data,
+            auth=(config["account_sid"], config["auth_token"]),
+            timeout=WHATSAPP_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise TwilioWhatsAppError(f"Unable to reach Twilio ({exc})") from exc
+    if response.status_code >= 400:
+        message: Optional[str] = None
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                message = payload.get("message") or payload.get("error_message")
+        except ValueError:
+            message = None
+        if not message:
+            message = f"Twilio error ({response.status_code})"
+        raise TwilioWhatsAppError(message)
 
 
 def _post_discord_message(content: str, *, title: Optional[str] = None, color: Optional[int] = None) -> None:
@@ -3051,6 +3160,57 @@ def import_occupancy_report():
         "week_cells": week_cells,
         "message": f"Updated {updated} day{'s' if updated != 1 else ''}.",
     })
+
+
+def _guess_image_mime(upload) -> Optional[str]:
+    mimetype = (getattr(upload, "mimetype", None) or "").strip()
+    if mimetype and mimetype.startswith("image/"):
+        return mimetype
+    filename = getattr(upload, "filename", "") or ""
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed and guessed.startswith("image/"):
+        return guessed
+    return None
+
+
+@app.route("/api/whatsapp/send-image", methods=["POST"])
+def send_whatsapp_image():
+    config = _twilio_config()
+    if not config:
+        return jsonify({
+            "ok": False,
+            "error": "WhatsApp sandbox is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_TO, and WHATSAPP_MEDIA_BASE_URL.",
+        }), 503
+
+    upload = request.files.get("image")
+    if upload is None or not upload.filename:
+        return jsonify({"ok": False, "error": "Paste an image before sending."}), 400
+
+    file_bytes = upload.read() or b""
+    if not file_bytes:
+        return jsonify({"ok": False, "error": "Could not read the pasted image."}), 400
+    if len(file_bytes) > WHATSAPP_MAX_IMAGE_BYTES:
+        limit_mb = WHATSAPP_MAX_IMAGE_BYTES // (1024 * 1024)
+        return jsonify({"ok": False, "error": f"Images must be smaller than {limit_mb} MB."}), 400
+
+    mime_type = _guess_image_mime(upload)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+    if not mime_type.startswith("image/"):
+        return jsonify({"ok": False, "error": "Only image files can be sent to WhatsApp."}), 400
+
+    caption = (request.form.get("caption") or "").strip()
+    guessed_ext = mimetypes.guess_extension(mime_type.split(";")[0]) or ".bin"
+    stored_filename = _persist_whatsapp_media(file_bytes, guessed_ext)
+    media_url = _build_media_url(config["media_base_url"], stored_filename)
+
+    try:
+        _send_twilio_whatsapp_image(config, media_url=media_url, caption=caption or None)
+    except TwilioWhatsAppError as exc:
+        app.logger.warning("Twilio WhatsApp error: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    return jsonify({"ok": True, "message": "Image sent to WhatsApp sandbox."})
 
 
 @app.route("/timeoff/delete/<int:tid>", methods=["POST"])
