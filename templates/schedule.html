@@ -80,6 +80,7 @@
             {% endfor %}
           </div>
           {% for emp in breakfast.employees %}
+            {% set emp_id = breakfast.employee_ids.get(emp) %}
             <div class="row" role="row">
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
@@ -88,7 +89,7 @@
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
-                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
@@ -124,6 +125,7 @@
             {% endfor %}
           </div>
           {% for emp in front_desk.employees %}
+            {% set emp_id = front_desk.employee_ids.get(emp) %}
             <div class="row" role="row">
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
@@ -132,7 +134,7 @@
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
-                <div class="cell" role="cell" data-section="Front Desk" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                <div class="cell" role="cell" data-section="Front Desk" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
@@ -166,6 +168,7 @@
             {% endfor %}
           </div>
           {% for emp in shuttle.employees %}
+            {% set emp_id = shuttle.employee_ids.get(emp) %}
             <div class="row" role="row">
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
@@ -175,7 +178,7 @@
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
                 {% set suggestion = shuttle_suggestions.get(d.key) %}
-                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}">
+                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
@@ -351,6 +354,7 @@
             {% endfor %}
           </div>
           {% for emp in maintenance.employees %}
+            {% set emp_id = maintenance.employee_ids.get(emp) %}
             <div class="row" role="row">
               <div class="cell sticky" role="rowheader">{{ emp }}</div>
               {% for d in week.dates %}
@@ -359,7 +363,7 @@
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
                 {% set sel_cls = val | shift_class %}
-                <div class="cell" role="cell" data-section="Maintenance" data-employee="{{ emp }}" data-date="{{ d.key }}">
+                <div class="cell" role="cell" data-section="Maintenance" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}

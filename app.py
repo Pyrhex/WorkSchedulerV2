@@ -1311,6 +1311,7 @@ def build_week_context(week_id: int):
         sections = {
             sec.name: {
                 "employees": [],
+                "employee_ids": {},
                 "assignments": {},
                 "shifts": SECTION_SHIFT_MAP.get(sec.name, ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]),
                 "employee_shifts": {},
@@ -1363,6 +1364,7 @@ def build_week_context(week_id: int):
             sections[sec_name]["employees"] = [e.name for e in primary_emps]
 
             for emp in primary_emps:
+                sections[sec_name]["employee_ids"][emp.name] = emp.id
                 sections[sec_name]["assignments"][emp.name] = {d["key"]: "Set" for d in dates}
                 section_order = ordered_sections_for(emp.id) or [sec_name]
                 sections[sec_name]["employee_shifts"][emp.name] = combined_shift_options(section_order)

@@ -198,13 +198,15 @@ function updateConflictsUI() {
   cells.forEach(function(c){ c.classList.remove('conflict'); });
   const groups = {};
   cells.forEach(function(cell){
-    const emp = cell.getAttribute('data-employee');
+    const empId = cell.getAttribute('data-employee-id');
+    const empName = cell.getAttribute('data-employee');
+    const empKey = empId || empName;
     const dk = cell.getAttribute('data-date');
-    if (!emp || !dk) return;
+    if (!empKey || !dk) return;
     const sel = cell.querySelector('select');
     const val = sel ? sel.value : null;
     const active = !!val && val !== 'Set' && !TIME_OFF_VALUES.has(val);
-    const key = emp + '||' + dk;
+    const key = empKey + '||' + dk;
     if (!groups[key]) groups[key] = [];
     groups[key].push({ cell: cell, active: active });
   });
