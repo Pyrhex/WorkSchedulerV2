@@ -4611,9 +4611,9 @@ def export_schedule_excel(week_id: int):
                 if value is None:
                     cell.value = None
                 else:
-                    cell.value = value
-                    if cell.number_format in ("General", "", None):
-                        cell.number_format = '0"%"'
+                    # Always display occupancy with a trailing percent sign per export request
+                    cell.value = f"{value}%"
+                    cell.number_format = "General"
 
         if crew_row_map:
             for carrier, row_num in crew_row_map.items():
