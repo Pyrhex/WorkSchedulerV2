@@ -440,7 +440,13 @@ FRONT_DESK_SHIFTS = [
     "Audit (10:15PM–6:15AM)",
 ]
 
-# Shuttle: four fixed 8-hour variants
+SHUTTLE_CREW_SHIFTS = [
+    "Crew (5:45PM–1:45AM)",
+    "Crew (8:00PM–12:00AM)",
+    "Crew (9:00PM–1:00AM)",
+]
+
+# Shuttle: fixed variants plus crew windows
 SHUTTLE_SHIFTS = [
     "Set",
     TIME_OFF_LABEL,
@@ -449,8 +455,9 @@ SHUTTLE_SHIFTS = [
     "Midday (10:30AM–6:30PM)",
     SHUTTLE_COMBO_LABEL,
     "PM (5:30PM–1:30AM)",
-    "Crew (5:45PM–1:45AM)",
-]
+] + SHUTTLE_CREW_SHIFTS
+
+DEFAULT_CREW_SHIFT = SHUTTLE_CREW_SHIFTS[0]
 
 MAINTENANCE_SHIFTS = [
     "Set",
@@ -486,6 +493,8 @@ AIRCREW_HEADER_SKIP = {"day", "days", "weekday", "week", "notes", "note", "fligh
 EXCEL_EPOCH = date(1899, 12, 30)
 MAX_AIRCREW_IMPORT_WARNINGS = 20
 AIRCREW_TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?", re.IGNORECASE)
+CUSTOM_SHIFT_TIME_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])", re.IGNORECASE)
+CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45
 
 
 def _clean_header_value(value: Any) -> str:
@@ -1196,13 +1205,13 @@ def seed_example_assignments_db(week_id: int, s: Session):
                 continue
             a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
             if a:
-                a.value = choice([
+                shuttle_choices = [
                     "AM (3:30AM–11:30AM)",
                     "Midday (10:30AM–6:30PM)",
                     "PM (5:30PM–1:30AM)",
-                    "Crew (5:45PM–1:45AM)",
-                    "Set"
-                ])
+                    "Set",
+                ] + SHUTTLE_CREW_SHIFTS
+                a.value = choice(shuttle_choices)
 
         # Maintenance (one sample per day if available)
         if maint_emp_ids:
@@ -1698,6 +1707,22 @@ def time_only(label: str) -> str:
     return label
 
 
+def _shift_start_minutes(label: Optional[str]) -> Optional[int]:
+    if not label:
+        return None
+    normalized = str(label).replace("–", "-")
+    match = CUSTOM_SHIFT_TIME_PATTERN.search(normalized)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
+    period = (match.group(3) or "").lower()
+    hour = hour % 12
+    if period == "pm":
+        hour += 12
+    return (hour * 60) + minute
+
+
 def shift_css_class(label: Optional[str]) -> str:
     if not label:
         return ""
@@ -1727,6 +1752,9 @@ def shift_css_class(label: Optional[str]) -> str:
         return "select-green"
     if label == "8AM–4:30PM":
         return "select-green"
+    start_minutes = _shift_start_minutes(label)
+    if start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
+        return "select-red"
     return ""
 
 
@@ -2311,9 +2339,7 @@ def role_availability_variants(role_name: str) -> list[str]:
             "AM (3:30AM–11:30AM)",
             "Midday (10:30AM–6:30PM)",
             "PM (5:30PM–1:30AM)",
-            "Crew (5:45PM–1:45AM)",
-            SHUTTLE_COMBO_LABEL,
-        ]
+        ] + SHUTTLE_CREW_SHIFTS + [SHUTTLE_COMBO_LABEL]
     if role_name == "Maintenance":
         return ["8AM–4:30PM"]
     return []
@@ -3607,7 +3633,7 @@ def generate_new_schedule_db(week_id: int):
                 "AM (3:30AM–11:30AM)",
                 "Midday (10:30AM–6:30PM)",
                 "PM (5:30PM–1:30AM)",
-                "Crew (5:45PM–1:45AM)",
+                DEFAULT_CREW_SHIFT,
             ]
             for v in variants:
                 if not pool:
@@ -4197,7 +4223,7 @@ def generate_4_week_schedule(start_week_id: int):
                     "AM (3:30AM–11:30AM)",
                     "Midday (10:30AM–6:30PM)",
                     "PM (5:30PM–1:30AM)",
-                    "Crew (5:45PM–1:45AM)",
+                    DEFAULT_CREW_SHIFT,
                 ]
                 for v in variants:
                     cand = []

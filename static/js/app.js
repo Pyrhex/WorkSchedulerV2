@@ -1,6 +1,8 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
+const SHIFT_TIME_REGEX = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+const CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45;
 const CUSTOM_SHIFT_VALUE = '__custom__';
 
 function ensureTimeOffOptions(selectEl) {
@@ -78,6 +80,20 @@ function isSuggestedCrewValue(value) {
   return typeof value === 'string' && CREW_SUGGESTION_REGEX.test(value);
 }
 
+function shiftStartMinutes(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\u2013/g, '-');
+  const match = SHIFT_TIME_REGEX.exec(normalized);
+  if (!match) return null;
+  let hour = parseInt(match[1], 10);
+  const minute = match[2] ? parseInt(match[2], 10) : 0;
+  const period = (match[3] || '').toLowerCase();
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  hour = hour % 12;
+  if (period === 'pm') hour += 12;
+  return (hour * 60) + minute;
+}
+
 function selectClassForValue(_section, value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
@@ -94,6 +110,8 @@ function selectClassForValue(_section, value) {
   if (value.startsWith('PM')) return 'select-purple';
   if (value.startsWith('AM')) return 'select-green';
   if (value === '8AM–4:30PM') return 'select-green';
+  const startMinutes = shiftStartMinutes(value);
+  if (startMinutes !== null && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) return 'select-red';
   return '';
 }
 
