@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from copy import copy as copy_style
+from functools import lru_cache
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from random import choice, sample
@@ -1285,20 +1286,17 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
 
             shuttle_value = a.value or ""
             # Shuttle variants: include dynamic crew suggestions so coverage stays accurate
-            if shuttle_value in SHUTTLE_SHIFTS:
-                if shuttle_value == "AM (3:30AM–11:30AM)":
-                    sh_counts[date_key]["AM"] += 1
-                elif shuttle_value == SHUTTLE_COMBO_LABEL:
-                    sh_counts[date_key]["Midday"] += 1
-                    sh_counts[date_key]["Crew"] += 1
-                elif shuttle_value.startswith("Midday"):
-                    sh_counts[date_key]["Midday"] += 1
-                elif shuttle_value.startswith("PM (5:30PM"):
-                    sh_counts[date_key]["PM"] += 1
-                elif shuttle_value.startswith("Crew"):
-                    sh_counts[date_key]["Crew"] += 1
-            elif is_suggested_crew_label(shuttle_value):
+            variant: Optional[str] = None
+            if shuttle_value == SHUTTLE_COMBO_LABEL:
+                sh_counts[date_key]["Midday"] += 1
                 sh_counts[date_key]["Crew"] += 1
+            else:
+                variant = _infer_shuttle_variant(shuttle_value)
+                if variant:
+                    sh_counts[date_key][variant] += 1
+                elif is_suggested_crew_label(shuttle_value):
+                    sh_counts[date_key]["Crew"] += 1
+
 
             # Breakfast variants (exact labels)
             if a.value in bb_variants:
@@ -1707,23 +1705,80 @@ def time_only(label: str) -> str:
     return label
 
 
-def _shift_start_minutes(label: Optional[str]) -> Optional[int]:
+def _shift_time_points(label: Optional[str]) -> list[int]:
     if not label:
-        return None
+        return []
     normalized = str(label).replace("–", "-")
-    match = CUSTOM_SHIFT_TIME_PATTERN.search(normalized)
-    if not match:
-        return None
-    hour = int(match.group(1))
-    minute = int(match.group(2) or "0")
-    period = (match.group(3) or "").lower()
-    hour = hour % 12
-    if period == "pm":
-        hour += 12
-    return (hour * 60) + minute
+    matches: list[int] = []
+    for match in CUSTOM_SHIFT_TIME_PATTERN.finditer(normalized):
+        hour = int(match.group(1))
+        minute = int(match.group(2) or "0")
+        period = (match.group(3) or "").lower()
+        hour = hour % 12
+        if period == "pm":
+            hour += 12
+        matches.append((hour * 60) + minute)
+    return matches
 
 
-def shift_css_class(label: Optional[str]) -> str:
+def _shift_start_minutes(label: Optional[str]) -> Optional[int]:
+    times = _shift_time_points(label)
+    return times[0] if times else None
+
+
+def _shift_window_minutes(label: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    times = _shift_time_points(label)
+    if len(times) < 2:
+        return (None, None)
+    start = times[0]
+    end = times[1]
+    if end <= start:
+        end += 24 * 60
+    return (start, end)
+
+
+def _window_overlap_minutes(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
+    return max(0, min(a_end, b_end) - max(a_start, b_start))
+
+
+@lru_cache(maxsize=1)
+def _shift_classification_windows() -> list[tuple[int, int, str]]:
+    windows: list[tuple[int, int, str]] = []
+    for labels in SECTION_SHIFT_MAP.values():
+        for label in labels:
+            if not label or label in NEUTRAL_ASSIGNMENT_VALUES or label in TIME_OFF_VALUES or label == SHUTTLE_COMBO_LABEL:
+                continue
+            start, end = _shift_window_minutes(label)
+            if start is None or end is None:
+                continue
+            css_class = _basic_shift_css_class(label)
+            if not css_class:
+                continue
+            windows.append((start, end, css_class))
+    return windows
+
+
+def _match_shift_window_class(label: Optional[str]) -> str:
+    if not label:
+        return ""
+    start, end = _shift_window_minutes(label)
+    if start is None or end is None:
+        return ""
+    best_class = ""
+    best_overlap = 0
+    best_start = 1_000_000
+    for win_start, win_end, css_class in _shift_classification_windows():
+        overlap = _window_overlap_minutes(start, end, win_start, win_end)
+        if overlap >= 300 and (
+            overlap > best_overlap or (overlap == best_overlap and win_start < best_start)
+        ):
+            best_overlap = overlap
+            best_start = win_start
+            best_class = css_class
+    return best_class
+
+
+def _basic_shift_css_class(label: Optional[str]) -> str:
     if not label:
         return ""
     if label == "Set":
@@ -1756,6 +1811,60 @@ def shift_css_class(label: Optional[str]) -> str:
     if start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
         return "select-red"
     return ""
+
+
+def shift_css_class(label: Optional[str]) -> str:
+    cls = _basic_shift_css_class(label)
+    if cls:
+        return cls
+    return _match_shift_window_class(label)
+
+
+@lru_cache(maxsize=1)
+def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
+    variants = {
+        "AM": _shift_window_minutes("AM (3:30AM–11:30AM)"),
+        "Midday": _shift_window_minutes("Midday (10:30AM–6:30PM)"),
+        "PM": _shift_window_minutes("PM (5:30PM–1:30AM)"),
+        "Crew": _shift_window_minutes(DEFAULT_CREW_SHIFT),
+    }
+    resolved: dict[str, tuple[int, int]] = {}
+    for key, window in variants.items():
+        if not window:
+            continue
+        start, end = window
+        if start is None or end is None:
+            continue
+        resolved[key] = (start, end)
+    return resolved
+
+
+def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
+    value = (label or "").strip()
+    if not value:
+        return None
+    if value == "AM (3:30AM–11:30AM)":
+        return "AM"
+    if value.startswith("Midday"):
+        return "Midday"
+    if value.startswith("PM (5:30PM"):
+        return "PM"
+    if value.startswith("Crew"):
+        return "Crew"
+    start_minutes = _shift_start_minutes(value)
+    if start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
+        return "Crew"
+    start, end = _shift_window_minutes(value)
+    if start is None or end is None:
+        return None
+    best_variant = None
+    best_overlap = 0
+    for variant, (win_start, win_end) in _shuttle_variant_windows().items():
+        overlap = _window_overlap_minutes(start, end, win_start, win_end)
+        if overlap >= 300 and overlap > best_overlap:
+            best_variant = variant
+            best_overlap = overlap
+    return best_variant
 
 
 @app.template_filter("shift_class")

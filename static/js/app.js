@@ -1,9 +1,27 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
-const SHIFT_TIME_REGEX = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i;
+const SHIFT_TIME_REGEX_GLOBAL = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/ig;
 const CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45;
 const CUSTOM_SHIFT_VALUE = '__custom__';
+const CANONICAL_SHIFT_LABELS = [
+  '5AM–12PM',
+  '6AM–12PM',
+  '7AM–12PM',
+  'AM (6:00AM–2:00PM)',
+  'AM (6:15AM–2:15PM)',
+  'PM (2:00PM–10:00PM)',
+  'PM (2:15PM–10:15PM)',
+  'Audit (10:00PM–6:00AM)',
+  'Audit (10:15PM–6:15AM)',
+  'AM (3:30AM–11:30AM)',
+  'Midday (10:30AM–6:30PM)',
+  'PM (5:30PM–1:30AM)',
+  'Crew (5:45PM–1:45AM)',
+  'Crew (8:00PM–12:00AM)',
+  'Crew (9:00PM–1:00AM)',
+  '8AM–4:30PM',
+];
 
 function ensureTimeOffOptions(selectEl) {
   if (![...selectEl.options].some(o => o.value === 'TIME OFF')) {
@@ -80,21 +98,43 @@ function isSuggestedCrewValue(value) {
   return typeof value === 'string' && CREW_SUGGESTION_REGEX.test(value);
 }
 
-function shiftStartMinutes(value) {
-  if (typeof value !== 'string') return null;
+function shiftTimePoints(value) {
+  if (typeof value !== 'string') return [];
   const normalized = value.replace(/\u2013/g, '-');
-  const match = SHIFT_TIME_REGEX.exec(normalized);
-  if (!match) return null;
-  let hour = parseInt(match[1], 10);
-  const minute = match[2] ? parseInt(match[2], 10) : 0;
-  const period = (match[3] || '').toLowerCase();
-  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
-  hour = hour % 12;
-  if (period === 'pm') hour += 12;
-  return (hour * 60) + minute;
+  const regex = new RegExp(SHIFT_TIME_REGEX_GLOBAL.source, 'ig');
+  const points = [];
+  let match;
+  while ((match = regex.exec(normalized))) {
+    let hour = parseInt(match[1], 10);
+    const minute = match[2] ? parseInt(match[2], 10) : 0;
+    const period = (match[3] || '').toLowerCase();
+    if (Number.isNaN(hour) || Number.isNaN(minute)) continue;
+    hour = hour % 12;
+    if (period === 'pm') hour += 12;
+    points.push((hour * 60) + minute);
+  }
+  return points;
 }
 
-function selectClassForValue(_section, value) {
+function shiftWindowMinutes(value) {
+  const points = shiftTimePoints(value);
+  if (points.length < 2) return null;
+  let start = points[0];
+  let end = points[1];
+  if (end <= start) end += 24 * 60;
+  return [start, end];
+}
+
+function windowOverlapMinutes(aStart, aEnd, bStart, bEnd) {
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+}
+
+function shiftStartMinutes(value) {
+  const points = shiftTimePoints(value);
+  return points.length ? points[0] : null;
+}
+
+function basicSelectClass(value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
@@ -113,6 +153,42 @@ function selectClassForValue(_section, value) {
   const startMinutes = shiftStartMinutes(value);
   if (startMinutes !== null && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) return 'select-red';
   return '';
+}
+
+function buildShiftClassWindows() {
+  return CANONICAL_SHIFT_LABELS.map(label => {
+    const window = shiftWindowMinutes(label);
+    if (!window) return null;
+    const className = basicSelectClass(label);
+    if (!className) return null;
+    return { start: window[0], end: window[1], className };
+  }).filter(Boolean);
+}
+
+const SHIFT_CLASS_WINDOWS = buildShiftClassWindows();
+
+function matchShiftClassByOverlap(value) {
+  const window = shiftWindowMinutes(value);
+  if (!window) return '';
+  const [start, end] = window;
+  let bestClass = '';
+  let bestOverlap = 0;
+  let bestStart = Number.POSITIVE_INFINITY;
+  SHIFT_CLASS_WINDOWS.forEach(ref => {
+    const overlap = windowOverlapMinutes(start, end, ref.start, ref.end);
+    if (overlap >= 300 && (overlap > bestOverlap || (overlap === bestOverlap && ref.start < bestStart))) {
+      bestOverlap = overlap;
+      bestStart = ref.start;
+      bestClass = ref.className;
+    }
+  });
+  return bestClass;
+}
+
+function selectClassForValue(_section, value) {
+  const cls = basicSelectClass(value);
+  if (cls) return cls;
+  return matchShiftClassByOverlap(value);
 }
 
 function updateSelectClass(selectEl, section, value) {
