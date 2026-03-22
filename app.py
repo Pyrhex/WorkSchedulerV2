@@ -459,6 +459,7 @@ SHUTTLE_SHIFTS = [
 ] + SHUTTLE_CREW_SHIFTS
 
 DEFAULT_CREW_SHIFT = SHUTTLE_CREW_SHIFTS[0]
+CREW_EXCEL_FILL = PatternFill(start_color="FFFFB347", end_color="FFFFB347", fill_type="solid")
 
 MAINTENANCE_SHIFTS = [
     "Set",
@@ -4822,6 +4823,13 @@ def export_schedule_excel(week_id: int):
 
         role_abbrev = {"Front Desk": "FD", "Breakfast Bar": "BB", "Shuttle": "SH", "Maintenance": "MA"}
 
+        def _is_crew_shift_label(value: Optional[str]) -> bool:
+            if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
+                return False
+            if value == SHUTTLE_COMBO_LABEL:
+                return True
+            return _infer_shuttle_variant(value) == "Crew"
+
         # Fill in the shift data
         import re
         def _normalize_shift_display(raw: str) -> str:
@@ -4867,12 +4875,13 @@ def export_schedule_excel(week_id: int):
                     col_letter = get_column_letter(5 + i)  # Start from column E (5)
                     date_key = date_info["key"]
                     shift_value = employee_assignments[date_key]
+                    cell = ws[f'{col_letter}{row_num}']
 
                     if shift_value is None or (isinstance(shift_value, str) and not shift_value.strip()):
-                        ws[f'{col_letter}{row_num}'] = "-"
+                        cell.value = "-"
                         continue
                     if isinstance(shift_value, str) and shift_value.strip() == "-":
-                        ws[f'{col_letter}{row_num}'] = "-"
+                        cell.value = "-"
                         continue
 
                     # For time-off, show as request type based on Vacation toggle
@@ -4880,9 +4889,9 @@ def export_schedule_excel(week_id: int):
                         is_dismissed = date_key in (dismissed_days.get(employee_name, set()) or set())
                         is_vac = date_key in (vacation_days.get(employee_name, set()) or set())
                         if shift_value == REQ_VAC_LABEL or (is_dismissed and is_vac):
-                            ws[f'{col_letter}{row_num}'] = "REQ VAC"
+                            cell.value = "REQ VAC"
                         else:
-                            ws[f'{col_letter}{row_num}'] = "REQ OFF"
+                            cell.value = "REQ OFF"
                         continue
 
                     # Format shift display: time-only and normalized dash spacing
@@ -4898,8 +4907,10 @@ def export_schedule_excel(week_id: int):
                         # normalize spacing around hyphen
                         shift_display = re.sub(r"\s*-\s*", " - ", shift_display)
 
-                    # Set the cell value
-                    ws[f'{col_letter}{row_num}'] = shift_display
+                    # Set the cell value and apply crew fill when needed
+                    cell.value = shift_display
+                    if _is_crew_shift_label(shift_value):
+                        cell.fill = CREW_EXCEL_FILL
 
         if occupancy_row is not None:
             for i, date_info in enumerate(dates):
