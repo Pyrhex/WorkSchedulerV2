@@ -31,6 +31,9 @@ load_dotenv()
 
 app = Flask(__name__)
 
+ASSET_VERSION = os.getenv("ASSET_VERSION", "20260318")
+app.jinja_env.globals["ASSET_VERSION"] = ASSET_VERSION
+
 
 TWILIO_MESSAGES_URL_TEMPLATE = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 WHATSAPP_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB

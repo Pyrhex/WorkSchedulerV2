@@ -23,7 +23,7 @@
         <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/delete{% else %}/delete{% endif %}" method="post" onsubmit="return confirm('Delete this schedule?');">
           <button class="btn danger" type="submit">Delete This Schedule</button>
         </form>
-        <button type="button" class="btn outline-primary" id="whatsapp-paste-trigger">Send WhatsApp Image</button>
+        <button type="button" class="btn whatsapp" id="whatsapp-paste-trigger">Send WhatsApp Image</button>
       </div>
       <div class="subtitle">{{ meta.fd_note }}</div>
     </section>

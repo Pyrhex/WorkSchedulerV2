@@ -222,6 +222,16 @@ body {
 .btn.delete-icon:focus { background: #b91c1c; }
 .btn.sm { padding: 6px 10px; font-size: 13px; }
 .btn.purple { background: var(--purple); color: #ffffff; }
+.btn.whatsapp { background: #25d366; color: #ffffff; }
+.btn.whatsapp:hover { background: #1eac54; }
+#whatsapp-paste-trigger {
+  background: #25d366;
+  color: #ffffff;
+  border-color: transparent;
+}
+#whatsapp-paste-trigger:hover {
+  background: #1eac54;
+}
 /* Colored outline variants for subtle emphasis */
 .btn.outline-primary { background: transparent; border-color: var(--primary); color: var(--primary); }
 .btn.outline-success { background: transparent; border-color: var(--success); color: var(--success); }
