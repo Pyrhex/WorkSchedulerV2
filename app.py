@@ -4823,7 +4823,9 @@ def export_schedule_excel(week_id: int):
 
         role_abbrev = {"Front Desk": "FD", "Breakfast Bar": "BB", "Shuttle": "SH", "Maintenance": "MA"}
 
-        def _is_crew_shift_label(value: Optional[str]) -> bool:
+        def _is_crew_shift_label(value: Optional[str], section_name: Optional[str] = None) -> bool:
+            if section_name != "Shuttle":
+                return False
             if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
                 return False
             if value == SHUTTLE_COMBO_LABEL:
@@ -4909,7 +4911,7 @@ def export_schedule_excel(week_id: int):
 
                     # Set the cell value and apply crew fill when needed
                     cell.value = shift_display
-                    if _is_crew_shift_label(shift_value):
+                    if _is_crew_shift_label(shift_value, section_name):
                         cell.fill = CREW_EXCEL_FILL
 
         if occupancy_row is not None:
