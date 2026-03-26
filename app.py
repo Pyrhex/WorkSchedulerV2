@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
 import requests
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select, update, delete
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -49,6 +49,7 @@ WHATSAPP_MEDIA_RELATIVE = Path("static/whatsapp-media")
 WHATSAPP_MEDIA_DIR = Path(app.root_path) / WHATSAPP_MEDIA_RELATIVE
 WHATSAPP_MEDIA_MAX_AGE_SECONDS = 24 * 60 * 60
 
+AIRCREW_LATE_NIGHT_MINUTES = 60  # Minutes past midnight treated as a "late night" slot
 
 class TwilioWhatsAppError(RuntimeError):
     """Raised when the Twilio WhatsApp API reports an error."""
@@ -311,7 +312,7 @@ class OccupancySnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     week_id: Mapped[int] = mapped_column(ForeignKey("weeks.id"))
     date: Mapped[date] = mapped_column(Date)
-    percentage: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    percentage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class TimeOff(Base):
@@ -850,6 +851,22 @@ def _normalize_aircrew_time(value: str) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def _aircrew_time_sort_key(value: str) -> tuple[int, str]:
+    try:
+        hour, minute = map(int, value.split(":", 1))
+    except Exception:
+        return (0, value)
+    total_minutes = hour * 60 + minute
+    if 0 <= total_minutes < AIRCREW_LATE_NIGHT_MINUTES:
+        total_minutes += 24 * 60
+    return total_minutes, value
+
+
+def _sort_aircrew_times(values: Iterable[str]) -> list[str]:
+    unique_values = {v for v in values if v}
+    return sorted(unique_values, key=_aircrew_time_sort_key)
+
+
 def _deserialize_aircrew_times(payload: Optional[str]) -> list[str]:
     if not payload:
         return []
@@ -867,7 +884,7 @@ def _deserialize_aircrew_times(payload: Optional[str]) -> list[str]:
                 if entry is None:
                     continue
                 _append_normalized(str(entry))
-            return sorted(set(cleaned))
+            return _sort_aircrew_times(cleaned)
     except Exception:
         pass
 
@@ -876,11 +893,12 @@ def _deserialize_aircrew_times(payload: Optional[str]) -> list[str]:
     for token in tokens:
         if token.strip():
             _append_normalized(token)
-    return sorted(set(cleaned))
+    return _sort_aircrew_times(cleaned)
 
 
 def _serialize_aircrew_times(times: Iterable[str]) -> str:
-    unique = sorted({ _normalize_aircrew_time(t) for t in times if t is not None })
+    normalized_times = (_normalize_aircrew_time(t) for t in times if t is not None)
+    unique = _sort_aircrew_times(normalized_times)
     return json.dumps(unique)
 
 
@@ -1011,7 +1029,7 @@ def init_db_once():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     week_id INTEGER NOT NULL,
                     date DATE NOT NULL,
-                    percentage INTEGER,
+                    percentage REAL,
                     UNIQUE(week_id, date)
                 )
                 """
@@ -3014,17 +3032,18 @@ def upsert_aircrew_arrival():
             )
             return row, _deserialize_aircrew_times(row.times if row else "")
 
-        def save_row(target_date: date, times_list: list[str], row: Optional[AircrewArrival]) -> None:
-            normalized = sorted({t for t in times_list})
+        def save_row(target_date: date, times_list: list[str], row: Optional[AircrewArrival]) -> list[str]:
+            normalized = _sort_aircrew_times(times_list)
             if row and not normalized:
                 s.delete(row)
-                return
+                return normalized
             if not row and not normalized:
-                return
+                return normalized
             if not row:
                 row = AircrewArrival(week_id=week.id, carrier=carrier, date=target_date, times="[]")
                 s.add(row)
             row.times = _serialize_aircrew_times(normalized)
+            return normalized
 
         row, current_times = load_row(dte)
         if action == "remove":
@@ -3033,8 +3052,8 @@ def upsert_aircrew_arrival():
             except Exception:
                 return jsonify({"ok": False, "error": "Invalid time"}), 400
             updated = [t for t in current_times if t != to_remove]
-            save_row(dte, updated, row)
-            response_cells[dte.isoformat()] = updated
+            normalized = save_row(dte, updated, row)
+            response_cells[dte.isoformat()] = normalized
         else:
             try:
                 to_add = _normalize_aircrew_time(time_value or "")
@@ -3042,8 +3061,8 @@ def upsert_aircrew_arrival():
                 return jsonify({"ok": False, "error": "Invalid time"}), 400
             if to_add not in current_times:
                 current_times.append(to_add)
-            save_row(dte, current_times, row)
-            response_cells[dte.isoformat()] = sorted(set(current_times))
+            normalized = save_row(dte, current_times, row)
+            response_cells[dte.isoformat()] = normalized
 
         s.commit()
 
@@ -3093,7 +3112,7 @@ def import_aircrew_schedule():
     with SessionLocal() as s:
         display_week = s.get(Week, display_week_id_int) if display_week_id_int else None
         for (carrier, day), times_set in parsed_updates.items():
-            normalized_times = sorted(times_set)
+            normalized_times = _sort_aircrew_times(times_set)
             touched_dates.add(day)
             touched_carriers.add(carrier)
             week_start = week_start_for_date(day)
@@ -3189,9 +3208,9 @@ def aircrew_import_template():
     )
 
 
-def _parse_occupancy_report(payload: str) -> dict[date, int]:
+def _parse_occupancy_report(payload: str) -> dict[date, float]:
     """Extract date -> occupancy percentage mapping from a text report."""
-    results: dict[date, int] = {}
+    results: dict[date, float] = {}
     for raw_line in payload.splitlines():
         line = (raw_line or "").strip()
         if not line:
@@ -3212,8 +3231,8 @@ def _parse_occupancy_report(payload: str) -> dict[date, int]:
             pct = float(percent_match.group(1))
         except ValueError:
             continue
-        pct_int = max(0, min(100, int(round(pct))))
-        results[dte] = pct_int
+        pct_value = max(0.0, min(100.0, pct))
+        results[dte] = pct_value
     return results
 
 
@@ -3236,7 +3255,7 @@ def update_occupancy():
     except Exception:
         return jsonify({"ok": False, "error": "Bad date"}), 400
 
-    def normalize_percentage(raw) -> Optional[int]:
+    def normalize_percentage(raw) -> Optional[float]:
         if raw is None:
             return None
         if isinstance(raw, str):
@@ -3250,7 +3269,7 @@ def update_occupancy():
         if math.isnan(numeric):
             raise ValueError
         numeric = max(0.0, min(100.0, numeric))
-        return int(round(numeric))
+        return numeric
 
     try:
         pct_value = normalize_percentage(value_raw)
@@ -3319,7 +3338,7 @@ def import_occupancy_report():
     updated = 0
     touched_dates: set[str] = set()
     per_week_batches: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    week_cells: dict[str, Optional[int]] = {}
+    week_cells: dict[str, Optional[float]] = {}
 
     with SessionLocal() as s:
         display_week = s.get(Week, display_week_id_int) if display_week_id_int else None
@@ -3332,7 +3351,7 @@ def import_occupancy_report():
                     OccupancySnapshot.date == dte,
                 )
             )
-            if row and row.percentage == pct_value:
+            if row and row.percentage is not None and math.isclose(row.percentage, pct_value, rel_tol=1e-09, abs_tol=1e-06):
                 continue
             if row:
                 row.percentage = pct_value
@@ -5071,7 +5090,7 @@ def export_schedule_excel(week_id: int):
                     cell.value = None
                 else:
                     # Always display occupancy with a trailing percent sign per export request
-                    cell.value = f"{value}%"
+                    cell.value = f"{float(value):.2f}%"
                     cell.number_format = "General"
 
         if crew_row_map:
@@ -5084,7 +5103,8 @@ def export_schedule_excel(week_id: int):
                     if not times:
                         cell.value = None
                         continue
-                    formatted_times = " / ".join(_format_aircrew_time_display(t) for t in sorted(times))
+                    ordered_times = _sort_aircrew_times(times)
+                    formatted_times = " / ".join(_format_aircrew_time_display(t) for t in ordered_times)
                     cell.value = formatted_times
                     existing_alignment = cell.alignment or Alignment()
                     cell.alignment = Alignment(

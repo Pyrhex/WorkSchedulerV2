@@ -902,8 +902,9 @@ function renderOccupancyCell(cell, value) {
   const hint = cell.querySelector('.occupancy-cell-hint');
   let cleaned = '';
   if (value !== null && value !== undefined && !Number.isNaN(Number(value))) {
-    const pct = Math.max(0, Math.min(100, Math.round(Number(value))));
-    cleaned = String(pct);
+    const numericValue = Number(value);
+    const clamped = Math.max(0, Math.min(100, numericValue));
+    cleaned = clamped.toFixed(2);
   }
   if (input) {
     input.value = cleaned;
@@ -978,9 +979,11 @@ function wireOccupancyInputs() {
           renderOccupancyCell(cell, cell.dataset.value || null);
           return;
         }
-        value = Math.max(0, Math.min(100, Math.round(num)));
-        if (String(value) !== raw) {
-          input.value = String(value);
+        const clamped = Math.max(0, Math.min(100, num));
+        value = clamped;
+        const normalized = clamped.toFixed(2);
+        if (input.value !== normalized) {
+          input.value = normalized;
         }
       }
       if (cell.dataset.saving === '1') return;

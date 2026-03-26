@@ -170,22 +170,27 @@
             <div class="cell sticky" role="rowheader">Hotel Occupancy</div>
             {% for d in week.dates %}
               {% set pct = occupancy_values.get(d.key) %}
-              <div class="cell occupancy-cell {% if pct is none %}empty{% endif %}" role="cell" data-date="{{ d.key }}" data-label="{{ d.label_long }}"{% if pct is not none %} data-value="{{ pct }}"{% endif %}>
+              {% if pct is not none %}
+                {% set pct_str = '%.2f'|format(pct|float) %}
+              {% else %}
+                {% set pct_str = '' %}
+              {% endif %}
+              <div class="cell occupancy-cell {% if pct is none %}empty{% endif %}" role="cell" data-date="{{ d.key }}" data-label="{{ d.label_long }}"{% if pct is not none %} data-value="{{ pct_str }}"{% endif %}>
                 <label class="occupancy-input-wrap">
                   <input type="number"
                          class="occupancy-input"
                          min="0"
                          max="100"
-                         step="1"
+                         step="0.01"
                          inputmode="numeric"
                          placeholder="0-100"
-                         value="{% if pct is not none %}{{ pct }}{% endif %}"
+                         value="{% if pct is not none %}{{ pct_str }}{% endif %}"
                          aria-label="Set occupancy for {{ d.label_long }}">
                   <span class="occupancy-input-suffix">%</span>
                 </label>
                 <span class="occupancy-cell-hint" aria-live="polite">
                   {% if pct is not none %}
-                    Saved {{ pct }}%
+                    Saved {{ pct_str }}%
                   {% else %}
                     Not set
                   {% endif %}
