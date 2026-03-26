@@ -1976,6 +1976,23 @@ def format_shift(label: str) -> str:
     label = re.sub(r"\s*-\s*", " - ", label)
     # Lowercase AM/PM tokens (handles attached forms like 6:00AM)
     label = re.sub(r"AM|PM", lambda m: m.group(0).lower(), label)
+    return _compact_evening_crew_display(label)
+
+
+def _compact_evening_crew_display(label: str) -> str:
+    """Collapse evening crew shift times like 8:00pm – 12:00am -> 8pm - 12am."""
+    if not label:
+        return label
+    normalized = label.replace("–", "-")
+    normalized = re.sub(r"\s*-\s*", "-", normalized)
+    normalized = normalized.lower()
+    mapping = {
+        "8:00pm-12:00am": "8pm - 12am",
+        "9:00pm-1:00am": "9pm - 1am",
+    }
+    replacement = mapping.get(normalized)
+    if replacement:
+        return replacement
     return label
 
 
@@ -4976,7 +4993,7 @@ def export_schedule_excel(week_id: int):
             # Specific display tweak for the combo shuttle shift requested by the team
             if original.strip().lower() == SHUTTLE_COMBO_LABEL.lower():
                 return "10:30am - 6:30pm (c)"
-            return raw
+            return _compact_evening_crew_display(raw)
 
         # Maps of employee -> set of date ISO strings
         vacation_days = ctx.get("vacation_days", {})
