@@ -127,10 +127,10 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
-                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        {% set req_label = ('REQ VAC ' ~ d.label_md) if (vac and dismissed) else ('REQ OFF ' ~ d.label_md) %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% elif opt == 'REQ VAC' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC {{ d.label_md }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
@@ -220,10 +220,10 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
-                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        {% set req_label = ('REQ VAC ' ~ d.label_md) if (vac and dismissed) else ('REQ OFF ' ~ d.label_md) %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% elif opt == 'REQ VAC' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC {{ d.label_md }}</option>
                       {% elif opt == '10:30am - 6:30pm (c)' %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt }}</option>
                       {% else %}
@@ -270,10 +270,10 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
-                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        {% set req_label = ('REQ VAC ' ~ d.label_md) if (vac and dismissed) else ('REQ OFF ' ~ d.label_md) %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% elif opt == 'REQ VAC' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC {{ d.label_md }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}
@@ -394,10 +394,10 @@
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
-                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        {% set req_label = ('REQ VAC ' ~ d.label_md) if (vac and dismissed) else ('REQ OFF ' ~ d.label_md) %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
                       {% elif opt == 'REQ VAC' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC {{ d.label_md }}</option>
                       {% else %}
                         <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
                       {% endif %}

@@ -374,6 +374,7 @@ def week_dates(start: date) -> List[dict]:
                 "key": d.isoformat(),
                 "label_short": d.strftime("%a %m/%d"),
                 "label_long": d.strftime("%a %b %d, %Y"),
+                "label_md": f"{d.month}/{d.day}",
             }
         )
     return result
@@ -4997,6 +4998,13 @@ def export_schedule_excel(week_id: int):
                 for i, date_info in enumerate(dates):
                     col_letter = get_column_letter(5 + i)  # Start from column E (5)
                     date_key = date_info["key"]
+                    date_label_md = date_info.get("label_md")
+                    if not date_label_md:
+                        try:
+                            parsed_date = date.fromisoformat(date_key)
+                            date_label_md = f"{parsed_date.month}/{parsed_date.day}"
+                        except Exception:
+                            date_label_md = ""
                     shift_value = employee_assignments[date_key]
                     cell = ws[f'{col_letter}{row_num}']
 
@@ -5012,9 +5020,11 @@ def export_schedule_excel(week_id: int):
                         is_dismissed = date_key in (dismissed_days.get(employee_name, set()) or set())
                         is_vac = date_key in (vacation_days.get(employee_name, set()) or set())
                         if shift_value == REQ_VAC_LABEL or (is_dismissed and is_vac):
-                            cell.value = "REQ VAC"
+                            suffix = f" {date_label_md}" if date_label_md else ""
+                            cell.value = f"REQ VAC{suffix}"
                         else:
-                            cell.value = "REQ OFF"
+                            suffix = f" {date_label_md}" if date_label_md else ""
+                            cell.value = f"REQ OFF{suffix}"
                         continue
 
                     # Format shift display: time-only and normalized dash spacing

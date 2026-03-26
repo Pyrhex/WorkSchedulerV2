@@ -23,6 +23,60 @@ const CANONICAL_SHIFT_LABELS = [
   '8AM–4:30PM',
 ];
 
+function reqVacLabelForDateKey(dateKey) {
+  if (!dateKey) {
+    return 'REQ VAC';
+  }
+  const parts = dateKey.split('-');
+  if (parts.length !== 3) {
+    return 'REQ VAC';
+  }
+  const month = parseInt(parts[1], 10);
+  const day = parseInt(parts[2], 10);
+  if (Number.isNaN(month) || Number.isNaN(day)) {
+    return 'REQ VAC';
+  }
+  return `REQ VAC ${month}/${day}`;
+}
+
+function reqOffLabelForDateKey(dateKey) {
+  if (!dateKey) {
+    return 'REQ OFF';
+  }
+  const parts = dateKey.split('-');
+  if (parts.length !== 3) {
+    return 'REQ OFF';
+  }
+  const month = parseInt(parts[1], 10);
+  const day = parseInt(parts[2], 10);
+  if (Number.isNaN(month) || Number.isNaN(day)) {
+    return 'REQ OFF';
+  }
+  return `REQ OFF ${month}/${day}`;
+}
+
+function applyTimeOffLabelsToSelect(selectEl) {
+  if (!selectEl) {
+    return;
+  }
+  const cell = selectEl.closest('.cell');
+  const dateKey = cell ? cell.getAttribute('data-date') : '';
+  const vacLabel = reqVacLabelForDateKey(dateKey);
+  const offLabel = reqOffLabelForDateKey(dateKey);
+  Array.from(selectEl.options).forEach(opt => {
+    if (opt.value === 'REQ VAC') {
+      opt.textContent = vacLabel;
+    } else if (opt.value === 'TIME OFF') {
+      const trimmed = (opt.textContent || '').trim().toUpperCase();
+      if (trimmed.startsWith('REQ VAC')) {
+        opt.textContent = vacLabel;
+      } else {
+        opt.textContent = offLabel;
+      }
+    }
+  });
+}
+
 function ensureTimeOffOptions(selectEl) {
   if (![...selectEl.options].some(o => o.value === 'TIME OFF')) {
     const opt = document.createElement('option');
@@ -36,6 +90,7 @@ function ensureTimeOffOptions(selectEl) {
     opt.textContent = 'REQ VAC';
     selectEl.insertBefore(opt, selectEl.firstChild);
   }
+  applyTimeOffLabelsToSelect(selectEl);
 }
 
 function showToast(msg) {
@@ -202,8 +257,10 @@ function initSelectColors() {
     const cell = sel.closest('.cell');
     const section = cell ? cell.getAttribute('data-section') : '';
     updateSelectClass(sel, section, sel.value);
+    applyTimeOffLabelsToSelect(sel);
   });
 }
+
 
 function updateCoverageUI(data) {
   const {
