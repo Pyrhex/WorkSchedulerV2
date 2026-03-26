@@ -1018,6 +1018,23 @@ function wireOccupancyUpload() {
   });
 }
 
+function wireScheduleTemplateUpload() {
+  const form = document.getElementById('schedule-template-upload-form');
+  const trigger = document.getElementById('schedule-template-upload-trigger');
+  const input = document.getElementById('schedule-template-upload-input');
+  if (!form || !trigger || !input) return;
+  trigger.addEventListener('click', () => {
+    if (trigger.disabled) return;
+    input.click();
+  });
+  input.addEventListener('change', () => {
+    if (!input.files || !input.files.length) return;
+    trigger.disabled = true;
+    trigger.textContent = 'Uploading…';
+    form.submit();
+  });
+}
+
 function initAircrewTimePicker() {
   const modal = document.getElementById('aircrew-time-modal');
   if (!modal) return null;
@@ -1907,6 +1924,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireAircrewArrivals();
   wireOccupancyInputs();
   wireOccupancyUpload();
+  wireScheduleTemplateUpload();
   initTemplateControls();
   initWhatsappPasteModal();
 });

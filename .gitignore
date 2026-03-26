@@ -2,3 +2,4 @@ venv
 schedule.db
 log.txt
 .env
+old_schedule_templates/

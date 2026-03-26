@@ -24,7 +24,38 @@
           <button class="btn danger" type="submit">Delete This Schedule</button>
         </form>
         <button type="button" class="btn whatsapp" id="whatsapp-paste-trigger">Send WhatsApp Image</button>
+        <a class="btn ghost sm icon-only"
+           href="/schedule-template/download"
+           data-tooltip="Download template"
+           aria-label="Download Excel template">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 4v9"></path>
+            <path d="M8 9l4 4 4-4"></path>
+            <path d="M5 20h14"></path>
+          </svg>
+        </a>
+        <form action="/schedule-template/upload" method="post" enctype="multipart/form-data" class="template-upload-form" id="schedule-template-upload-form">
+          <input type="hidden" name="week_id" value="{{ meta.week_id }}">
+          <input type="hidden" name="redirect_path" value="{{ request.full_path }}">
+          <input type="file" name="template" id="schedule-template-upload-input" accept=".xlsx" hidden>
+          <button type="button"
+                  class="btn secondary sm icon-only"
+                  id="schedule-template-upload-trigger"
+                  data-tooltip="Upload template"
+                  aria-label="Upload Excel template">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 20V11"></path>
+              <path d="M8 15l4-4 4 4"></path>
+              <path d="M5 4h14"></path>
+            </svg>
+          </button>
+        </form>
       </div>
+      {% if meta.template_upload %}
+        <div class="template-upload-status" data-state="{{ meta.template_upload.status }}">
+          {{ meta.template_upload.message }}
+        </div>
+      {% endif %}
       <div class="subtitle">{{ meta.fd_note }}</div>
     </section>
 

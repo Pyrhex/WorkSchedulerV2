@@ -6,6 +6,7 @@ import math
 import mimetypes
 import os
 import re
+import shutil
 import time
 import uuid
 from copy import copy as copy_style
@@ -15,7 +16,7 @@ from pathlib import Path
 from random import choice, sample
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
@@ -34,6 +35,11 @@ app = Flask(__name__)
 
 ASSET_VERSION = os.getenv("ASSET_VERSION", "20260318")
 app.jinja_env.globals["ASSET_VERSION"] = ASSET_VERSION
+
+BASE_DIR = Path(app.root_path)
+SCHEDULE_TEMPLATE_FILENAME = BASE_DIR / "ScheduleTemplate.xlsx"
+SCHEDULE_TEMPLATE_ARCHIVE_DIR = BASE_DIR / "old_schedule_templates"
+SCHEDULE_TEMPLATE_ALLOWED_SUFFIXES = {".xlsx"}
 
 
 TWILIO_MESSAGES_URL_TEMPLATE = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
@@ -109,6 +115,33 @@ def _persist_whatsapp_media(file_bytes: bytes, extension: str) -> str:
 def _build_media_url(base_url: str, filename: str) -> str:
     normalized = base_url.rstrip("/") + "/"
     return urljoin(normalized, filename)
+
+
+def _sanitize_redirect_target(raw: Optional[str]) -> str:
+    if not raw:
+        return ""
+    value = raw.strip()
+    if not value:
+        return ""
+    lowered = value.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://") or value.startswith("//"):
+        return ""
+    if not value.startswith("/"):
+        return ""
+    return value
+
+
+def _redirect_with_template_status(target_url: str, status: str, message: str) -> Response:
+    sanitized_status = status if status in {"success", "error"} else "error"
+    trimmed_message = (message or "").strip()
+    if len(trimmed_message) > 200:
+        trimmed_message = trimmed_message[:200]
+    parsed = list(urlparse(target_url or "/"))
+    query_items = dict(parse_qsl(parsed[4], keep_blank_values=True))
+    query_items["template_status"] = sanitized_status
+    query_items["template_message"] = trimmed_message
+    parsed[4] = urlencode(query_items)
+    return redirect(urlunparse(parsed))
 
 
 def _send_twilio_whatsapp_image(config: dict[str, str], *, media_url: str, caption: Optional[str]) -> None:
@@ -1616,6 +1649,22 @@ def build_week_context(week_id: int):
         }
 
 
+def _with_template_upload_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    status = (request.args.get("template_status") or "").lower()
+    if status not in {"success", "error"}:
+        return meta
+    message = (request.args.get("template_message") or "").strip()
+    if not message:
+        message = (
+            "Schedule template updated successfully."
+            if status == "success"
+            else "Unable to update the schedule template."
+        )
+    enriched = dict(meta)
+    enriched["template_upload"] = {"status": status, "message": message}
+    return enriched
+
+
 # Initialize DB at import time (Flask 3.x removed before_first_request)
 init_db_once()
 
@@ -1631,6 +1680,7 @@ def index():
         if not week:
             week = _ensure_week_and_assignments(s, start)
         ctx = build_week_context(week.id)
+    meta = _with_template_upload_meta(ctx["meta"])
     (
         counts,
         missing,
@@ -1649,7 +1699,7 @@ def index():
     ) = coverage_snapshot_db(week.id)
     return render_template(
         "schedule.html",
-        meta=ctx["meta"],
+        meta=meta,
         week=ctx["week"],
         breakfast=ctx["breakfast"],
         front_desk=ctx["front_desk"],
@@ -1938,6 +1988,7 @@ def aircrew_time_filter(value: Optional[str]) -> str:
 @app.route("/week/<int:week_id>")
 def view_week(week_id: int):
     ctx = build_week_context(week_id)
+    meta = _with_template_upload_meta(ctx["meta"])
     (
         counts,
         missing,
@@ -1956,7 +2007,7 @@ def view_week(week_id: int):
     ) = coverage_snapshot_db(week_id)
     return render_template(
         "schedule.html",
-        meta=ctx["meta"],
+        meta=meta,
         week=ctx["week"],
         breakfast=ctx["breakfast"],
         front_desk=ctx["front_desk"],
@@ -4574,19 +4625,89 @@ def next_week(week_id: int):
         return redirect(url_for("view_week", week_id=next_week.id))
 
 
+@app.route("/schedule-template/upload", methods=["POST"])
+def upload_schedule_template():
+    upload = request.files.get("template")
+    week_id = request.form.get("week_id", type=int)
+    redirect_path = _sanitize_redirect_target(request.form.get("redirect_path"))
+    target_url = (
+        redirect_path
+        or (url_for("view_week", week_id=week_id) if week_id else url_for("index"))
+    )
+
+    def fail(message: str):
+        return _redirect_with_template_status(target_url, "error", message)
+
+    if upload is None or not upload.filename:
+        return fail("Select a .xlsx file to upload.")
+
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in SCHEDULE_TEMPLATE_ALLOWED_SUFFIXES:
+        return fail("Only .xlsx files are supported.")
+
+    payload = upload.read()
+    if not payload:
+        return fail("The uploaded file is empty.")
+
+    try:
+        wb = load_workbook(io.BytesIO(payload))
+        wb.close()
+    except Exception:
+        return fail("Unable to read that Excel file. Please upload a valid .xlsx template.")
+
+    archive_path: Optional[Path] = None
+    if SCHEDULE_TEMPLATE_FILENAME.exists():
+        try:
+            SCHEDULE_TEMPLATE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            archive_path = SCHEDULE_TEMPLATE_ARCHIVE_DIR / f"ScheduleTemplate-{timestamp}.xlsx"
+            shutil.move(str(SCHEDULE_TEMPLATE_FILENAME), archive_path)
+        except Exception as exc:
+            app.logger.error("Unable to archive schedule template: %s", exc)
+            return fail("Unable to archive the existing template. Please try again.")
+
+    try:
+        with open(SCHEDULE_TEMPLATE_FILENAME, "wb") as f:
+            f.write(payload)
+    except Exception as exc:
+        app.logger.error("Unable to save schedule template: %s", exc)
+        if archive_path and archive_path.exists():
+            try:
+                shutil.move(str(archive_path), SCHEDULE_TEMPLATE_FILENAME)
+            except Exception:
+                app.logger.error("Unable to restore previous schedule template after failure.")
+        return fail("Unable to save the new template. Please try again.")
+
+    success_message = "Schedule template updated successfully."
+    if archive_path:
+        success_message = f"Template replaced. Previous version saved to {archive_path.name}."
+    return _redirect_with_template_status(target_url, "success", success_message)
+
+
+@app.route("/schedule-template/download")
+def download_schedule_template():
+    if not SCHEDULE_TEMPLATE_FILENAME.exists():
+        return Response("Schedule template not found.", status=404, mimetype="text/plain")
+    safe_name = f"ScheduleTemplate-{date.today().isoformat()}.xlsx"
+    return send_file(
+        SCHEDULE_TEMPLATE_FILENAME,
+        as_attachment=True,
+        download_name=safe_name,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/export/excel/<int:week_id>")
 def export_schedule_excel(week_id: int):
     """Export schedule to Excel file using the existing template"""
-    import os
-    
     with SessionLocal() as s:
         week = s.get(Week, week_id)
         if not week:
             return jsonify({"error": "Week not found"}), 404
         
         # Check if template exists
-        template_path = "ScheduleTemplate.xlsx"
-        if not os.path.exists(template_path):
+        template_path = SCHEDULE_TEMPLATE_FILENAME
+        if not template_path.exists():
             return jsonify({"error": "ScheduleTemplate.xlsx not found"}), 404
         
         # Get schedule data
