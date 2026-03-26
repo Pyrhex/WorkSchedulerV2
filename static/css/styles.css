@@ -37,7 +37,6 @@
   --missing-text: #991b1b;
   --duplicate-bg: #fffbeb;
   --duplicate-text: #92400e;
-  --aircrew-wheel-row: 36px;
 }
 
 html.dark-mode {
@@ -267,7 +266,14 @@ body {
 .tables { display: grid; gap: 16px; }
 .table-card { background: var(--card); border: 1px solid var(--grid); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
 .table-title { font-weight: 700; padding: 12px 16px; border-bottom: 1px solid var(--grid); background: var(--surface-soft); }
-.table-title.occupancy-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.table-title.occupancy-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  position: relative;
+  padding-right: 140px;
+}
 .table-hint { padding: 8px 16px 0; font-size: 12px; color: var(--muted); }
 
 .employee-row { cursor: grab; transition: background 0.15s ease, box-shadow 0.15s ease; }
@@ -307,6 +313,7 @@ body {
 .shift-select.select-red   { background: #b91c1c; border-color: #991b1b; color: #ffffff; }
 .shift-select.select-gray  { background: var(--shift-select-gray-bg); border-color: var(--grid); color: var(--text); }
 .shift-select.select-yellow{ background: #b45309; border-color: #92400e; color: #ffffff; }
+.shift-select.select-gold  { background: #0ea5e9; border-color: transparent; color: #ffffff; }
 .shift-select.select-purple{ background: #7c3aed; border-color: #6d28d9; color: #ffffff; }
 .shift-select.select-orange{ background: #f97316; border-color: #ea580c; color: #ffffff; }
 .aircrew-cell {
@@ -383,7 +390,7 @@ html.dark-mode .aircrew-chip {
   background: transparent;
   transform: scale(1.05);
 }
-.aircrew-wheel-modal {
+.aircrew-time-modal {
   position: fixed;
   inset: 0;
   display: flex;
@@ -394,29 +401,29 @@ html.dark-mode .aircrew-chip {
   pointer-events: none;
   transition: opacity 0.25s ease;
 }
-.aircrew-wheel-modal[aria-hidden="false"] {
+.aircrew-time-modal[aria-hidden="false"] {
   opacity: 1;
   pointer-events: auto;
 }
-.aircrew-wheel-overlay {
+.aircrew-time-overlay {
   position: absolute;
   inset: 0;
   background: rgba(15, 23, 42, 0.6);
 }
-.aircrew-wheel-dialog {
+.aircrew-time-dialog {
   position: relative;
   z-index: 1;
   width: min(360px, 90vw);
   margin: 0 16px;
 }
-.aircrew-wheel-card {
+.aircrew-time-card {
   background: var(--card);
-  border-radius: 24px;
-  padding: 18px 20px 10px;
+  border-radius: 20px;
+  padding: 20px;
   box-shadow: 0 30px 60px rgba(15, 23, 42, 0.35);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
 }
 .whatsapp-modal {
   position: fixed;
@@ -569,120 +576,149 @@ html.dark-mode .aircrew-chip {
 .whatsapp-feedback[data-state="info"] {
   color: var(--blue);
 }
-.aircrew-wheel-header {
-  text-align: center;
+.aircrew-time-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
-.aircrew-wheel-title {
-  font-size: 16px;
+.aircrew-time-title {
+  font-size: 18px;
   font-weight: 600;
   color: var(--text);
 }
-.aircrew-wheel-viewport {
-  position: relative;
-  padding: 10px 8px;
-  background: var(--surface-soft);
-  border-radius: 18px;
-  overflow: hidden;
+.aircrew-time-close {
+  border: none;
+  background: transparent;
+  font-size: 24px;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+  transition: color 0.2s ease, transform 0.2s ease;
 }
-.aircrew-wheel-highlight {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  top: 50%;
-  height: var(--aircrew-wheel-row, 36px);
-  transform: translateY(-50%);
+.aircrew-time-close:hover,
+.aircrew-time-close:focus {
+  color: var(--primary);
+  transform: scale(1.1);
+}
+.aircrew-time-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.aircrew-time-label {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.aircrew-time-input {
+  width: 100%;
+  padding: 12px 14px;
   border-radius: 12px;
-  background: var(--primary);
-  opacity: 0.35;
-  pointer-events: none;
+  border: 1px solid var(--grid);
+  font-size: 24px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--text);
+  background: var(--surface-soft);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
-.aircrew-wheel-guide {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+.aircrew-time-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+.aircrew-time-help {
   font-size: 12px;
   color: var(--muted);
-  opacity: 0.8;
 }
-.aircrew-wheel-guide--top { top: 6px; }
-.aircrew-wheel-guide--bottom { bottom: 6px; }
-.aircrew-wheel-columns {
-  position: relative;
-  display: grid;
-  grid-template-columns: 1.3fr 1fr 0.8fr;
-  gap: 12px;
-  padding: 18px 6px;
-}
-.aircrew-wheel-column {
-  position: relative;
-}
-.aircrew-wheel-list {
-  list-style: none;
-  margin: 0;
-  padding: calc(var(--aircrew-wheel-row, 36px) * 3) 0;
-  max-height: calc(var(--aircrew-wheel-row, 36px) * 7);
-  overflow-y: auto;
-  scrollbar-width: none;
-  scroll-snap-type: y mandatory;
-  scroll-padding-top: calc(var(--aircrew-wheel-row, 36px) * 3);
-  scroll-padding-bottom: calc(var(--aircrew-wheel-row, 36px) * 3);
-}
-.aircrew-wheel-list::-webkit-scrollbar { display: none; }
-.aircrew-wheel-item {
-  text-align: center;
-  font-size: 18px;
-  line-height: var(--aircrew-wheel-row, 36px);
-  color: var(--muted);
-  opacity: 0.45;
-  scroll-snap-align: center;
-  transition: color 0.2s ease, opacity 0.2s ease, font-weight 0.2s ease;
-}
-.aircrew-wheel-item.selected {
-  color: #ffffff;
-  opacity: 1;
-  font-weight: 600;
-}
-.aircrew-wheel-column--period .aircrew-wheel-item { font-size: 16px; }
-.aircrew-wheel-actions {
-  border-top: 1px solid var(--grid);
-  padding-top: 10px;
+.aircrew-time-quick {
   display: flex;
-  justify-content: center;
-  gap: 14px;
+  flex-direction: column;
+  gap: 6px;
 }
-.aircrew-wheel-action {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  border: none;
-  background: var(--surface-alt);
+.aircrew-time-quick-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.aircrew-time-quick-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--muted);
-  font-size: 20px;
-  cursor: pointer;
+}
+.aircrew-time-recents-clear {
+  font-size: 10px;
+  padding: 2px 6px;
+  line-height: 1.1;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+  gap: 4px;
+  min-height: 22px;
+  white-space: nowrap;
+  border-color: var(--grid);
+  background: transparent;
+  color: var(--muted);
 }
-.aircrew-wheel-action:hover,
-.aircrew-wheel-action:focus {
-  transform: scale(1.05);
-  color: var(--text);
+.aircrew-time-recents-clear:hover,
+.aircrew-time-recents-clear:focus {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(37, 99, 235, 0.08);
 }
-.aircrew-wheel-confirm {
-  background: var(--primary);
-  color: #fff;
+.aircrew-time-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.aircrew-wheel-confirm:hover,
-.aircrew-wheel-confirm:focus {
-  background: var(--primary-strong);
+.aircrew-time-preset {
+  border: 1px solid var(--grid);
+  background: #fff;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
-body.aircrew-wheel-open {
+.aircrew-time-preset:hover,
+.aircrew-time-preset:focus {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(37, 99, 235, 0.08);
+}
+.aircrew-time-recents-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+.aircrew-time-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  align-items: center;
+}
+body.aircrew-time-open {
   overflow: hidden;
 }
 
 .occupancy-table .row.header .cell.head { justify-content: center; align-items: center; }
-.occupancy-actions { display: flex; align-items: center; gap: 8px; }
+.occupancy-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  position: absolute;
+  top: 8px;
+  right: 16px;
+}
 .occupancy-upload-btn {
   width: 32px;
   height: 32px;
@@ -773,6 +809,7 @@ body.aircrew-wheel-open {
 .shift-select:disabled.select-red,
 .shift-select:disabled.select-gray,
 .shift-select:disabled.select-yellow,
+.shift-select:disabled.select-gold,
 .shift-select:disabled.select-purple,
 .shift-select:disabled.select-orange { color: #ffffff; opacity: 0.9; }
 

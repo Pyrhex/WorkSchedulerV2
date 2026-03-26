@@ -140,7 +140,7 @@ function basicSelectClass(value) {
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
   if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
   if (isSuggestedCrewValue(value)) return 'select-red';
-  if (value === '5AM–12PM') return 'select-green';
+  if (value === '5AM–12PM') return 'select-gold';
   if (value === '6AM–12PM') return 'select-blue';
   if (value === '7AM–12PM') return 'select-purple';
   if (value.startsWith('Audit')) return 'select-red';
@@ -192,7 +192,7 @@ function selectClassForValue(_section, value) {
 }
 
 function updateSelectClass(selectEl, section, value) {
-  selectEl.classList.remove('select-green', 'select-blue', 'select-red', 'select-gray', 'select-yellow', 'select-purple', 'select-orange');
+  selectEl.classList.remove('select-gold', 'select-green', 'select-blue', 'select-red', 'select-gray', 'select-yellow', 'select-purple', 'select-orange');
   const cls = selectClassForValue(section, value);
   if (cls) selectEl.classList.add(cls);
 }
@@ -682,8 +682,8 @@ function applyTimeOffUIUpdate(name, fromIso, toIso, approved, vacation) {
   });
 }
 
-const AIRCREW_WHEEL_DEFAULT = { hour: '6', minute: '00', period: 'PM' };
-let aircrewWheel = null;
+const AIRCREW_TIME_DEFAULT = '18:00';
+let aircrewTimePicker = null;
 
 function formatAircrewTimeLabel(value) {
   if (!value) return '';
@@ -693,6 +693,90 @@ function formatAircrewTimeLabel(value) {
   const displayHour = (h % 12) || 12;
   return `${displayHour}:${String(m).padStart(2, '0')}${suffix}`;
 }
+
+function normalizeAircrewTimeValue(value) {
+  if (!value) return null;
+  const [rawHour, rawMinute] = value.split(':');
+  const hour = Number(rawHour);
+  const minute = Number(rawMinute);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  const h = Math.min(23, Math.max(0, hour));
+  const m = Math.min(59, Math.max(0, minute));
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+const AIRCREW_RECENT_STORAGE_KEY = 'workScheduler.aircrewRecentTimes';
+const AIRCREW_RECENT_MAX = 6;
+let aircrewRecentTimes = [];
+const aircrewRecentsSubscribers = [];
+
+function loadAircrewRecentTimes() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(AIRCREW_RECENT_STORAGE_KEY);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map(item => normalizeAircrewTimeValue(item))
+        .filter(Boolean);
+    }
+  } catch (err) {
+    console.warn('Unable to load aircrew recents', err);
+  }
+  return [];
+}
+
+function saveAircrewRecentTimes(list) {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(AIRCREW_RECENT_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn('Unable to save aircrew recents', err);
+  }
+}
+
+function subscribeAircrewRecents(fn) {
+  if (typeof fn !== 'function') return;
+  aircrewRecentsSubscribers.push(fn);
+  try {
+    fn([...aircrewRecentTimes]);
+  } catch (err) {
+    console.warn('Aircrew recents subscriber error', err);
+  }
+}
+
+function notifyAircrewRecents() {
+  aircrewRecentsSubscribers.forEach(fn => {
+    try {
+      fn([...aircrewRecentTimes]);
+    } catch (err) {
+      console.warn('Aircrew recents subscriber error', err);
+    }
+  });
+}
+
+function recordAircrewRecentTime(value) {
+  const normalized = normalizeAircrewTimeValue(value);
+  if (!normalized) return;
+  if (aircrewRecentTimes.includes(normalized)) {
+    return;
+  }
+  const next = [normalized, ...aircrewRecentTimes].slice(0, AIRCREW_RECENT_MAX);
+  aircrewRecentTimes = next;
+  saveAircrewRecentTimes(aircrewRecentTimes);
+  notifyAircrewRecents();
+}
+
+function clearAircrewRecentTimes() {
+  if (!aircrewRecentTimes.length) return;
+  aircrewRecentTimes = [];
+  saveAircrewRecentTimes(aircrewRecentTimes);
+  notifyAircrewRecents();
+}
+
+aircrewRecentTimes = loadAircrewRecentTimes();
 
 function renderAircrewCell(cell, times) {
   if (!cell) return;
@@ -934,142 +1018,111 @@ function wireOccupancyUpload() {
   });
 }
 
-function convertWheelSelectionTo24(selection) {
-  if (!selection) return '18:00';
-  let hour = Number(selection.hour);
-  if (Number.isNaN(hour) || hour < 1 || hour > 12) {
-    hour = Number(AIRCREW_WHEEL_DEFAULT.hour);
-  }
-  const minute = selection.minute || AIRCREW_WHEEL_DEFAULT.minute;
-  const period = (selection.period || AIRCREW_WHEEL_DEFAULT.period).toUpperCase();
-  if (period === 'AM') {
-    hour = hour === 12 ? 0 : hour;
-  } else if (period === 'PM') {
-    hour = hour === 12 ? 12 : hour + 12;
-  }
-  return `${String(hour).padStart(2, '0')}:${minute}`;
-}
-
-function initAircrewWheelPicker() {
-  const modal = document.getElementById('aircrew-wheel-modal');
+function initAircrewTimePicker() {
+  const modal = document.getElementById('aircrew-time-modal');
   if (!modal) return null;
-  const overlay = modal.querySelector('.aircrew-wheel-overlay');
-  const confirmBtn = modal.querySelector('.aircrew-wheel-confirm');
-  const cancelBtn = modal.querySelector('.aircrew-wheel-cancel');
-  const lists = {
-    hour: modal.querySelector('.aircrew-wheel-list[data-wheel="hour"]'),
-    minute: modal.querySelector('.aircrew-wheel-list[data-wheel="minute"]'),
-    period: modal.querySelector('.aircrew-wheel-list[data-wheel="period"]'),
-  };
+  const overlay = modal.querySelector('.aircrew-time-overlay');
+  const closeBtn = modal.querySelector('.aircrew-time-close');
+  const cancelBtn = modal.querySelector('.aircrew-time-cancel');
+  const confirmBtn = modal.querySelector('.aircrew-time-confirm');
+  const input = modal.querySelector('#aircrew-time-input');
+  const recentsWrap = modal.querySelector('#aircrew-time-recents');
+  const recentsEmpty = modal.querySelector('#aircrew-time-recents-empty');
+  const clearRecentsBtn = modal.querySelector('#aircrew-time-recents-clear');
+
   const state = {
-    modal,
-    overlay,
-    confirmBtn,
-    cancelBtn,
-    lists,
-    wheels: {},
-    values: { ...AIRCREW_WHEEL_DEFAULT },
     current: null,
+    lastValue: aircrewRecentTimes[0] || AIRCREW_TIME_DEFAULT,
   };
 
-  const buildWheel = (type) => {
-    const list = lists[type];
-    if (!list) return null;
-    const items = Array.from(list.querySelectorAll('.aircrew-wheel-item'));
-    const rowHeight = items[0]?.getBoundingClientRect().height || 36;
-    const wheel = {
-      list,
-      items,
-      rowHeight,
-      snapTimer: null,
-      selectedIndex: 0,
-    };
-
-    const applySelection = (index) => {
-      const clamped = Math.min(Math.max(index, 0), items.length - 1);
-      wheel.selectedIndex = clamped;
-      items.forEach((item, idx) => item.classList.toggle('selected', idx === clamped));
-      const val = items[clamped]?.getAttribute('data-value');
-      if (val) {
-        state.values[type] = val;
-      }
-    };
-
-    const scrollToIndex = (index, behavior = 'auto') => {
-      const clamped = Math.min(Math.max(index, 0), items.length - 1);
-      const top = clamped * rowHeight;
-      list.scrollTo({ top, behavior: behavior === 'instant' ? 'auto' : behavior });
-      applySelection(clamped);
-    };
-
-    list.addEventListener('scroll', () => {
-      const idx = Math.round(list.scrollTop / rowHeight);
-      applySelection(idx);
-      if (wheel.snapTimer) {
-        clearTimeout(wheel.snapTimer);
-      }
-      wheel.snapTimer = window.setTimeout(() => {
-        scrollToIndex(idx, 'smooth');
-        wheel.snapTimer = null;
-      }, 120);
-    });
-
-    wheel.scrollToIndex = scrollToIndex;
-    wheel.applySelection = applySelection;
-    return wheel;
-  };
-
-  Object.keys(lists).forEach((key) => {
-    state.wheels[key] = buildWheel(key);
-  });
-
-  const syncValues = (mode = 'auto') => {
-    Object.entries(state.wheels).forEach(([type, wheel]) => {
-      if (!wheel) return;
-      const value = state.values[type];
-      const idx = wheel.items.findIndex(item => item.getAttribute('data-value') === value);
-      wheel.scrollToIndex(idx >= 0 ? idx : 0, mode === 'instant' ? 'instant' : 'auto');
-    });
+  const setValue = (value) => {
+    const normalized = normalizeAircrewTimeValue(value) || AIRCREW_TIME_DEFAULT;
+    state.lastValue = normalized;
+    if (input) {
+      input.value = normalized;
+    }
   };
 
   const close = () => {
     modal.setAttribute('aria-hidden', 'true');
-    document.body.classList.remove('aircrew-wheel-open');
+    document.body.classList.remove('aircrew-time-open');
     state.current = null;
   };
 
   const confirmSelection = () => {
-    if (!state.current || typeof state.current.onConfirm !== 'function') {
-      close();
+    const raw = input?.value || state.lastValue || AIRCREW_TIME_DEFAULT;
+    const normalized = normalizeAircrewTimeValue(raw);
+    if (!normalized) {
+      showToast('Enter a valid time (HH:MM)');
+      input?.focus();
       return;
     }
-    const payload = { ...state.values };
-    const time12 = `${payload.hour}:${payload.minute} ${payload.period}`;
-    const time24 = convertWheelSelectionTo24(payload);
-    const cb = state.current.onConfirm;
+    state.lastValue = normalized;
+    const cb = state.current?.onConfirm;
     close();
-    cb({ time12, time24 });
+    if (typeof cb === 'function') {
+      cb({ time24: normalized });
+    }
   };
 
-  const open = (target = {}) => {
-    state.current = target;
-    const preset = target.prefill || AIRCREW_WHEEL_DEFAULT;
-    state.values = {
-      hour: preset.hour || AIRCREW_WHEEL_DEFAULT.hour,
-      minute: preset.minute || AIRCREW_WHEEL_DEFAULT.minute,
-      period: preset.period || AIRCREW_WHEEL_DEFAULT.period,
-    };
+  const open = ({ onConfirm, prefill } = {}) => {
+    state.current = { onConfirm };
+    const fallback = state.lastValue || aircrewRecentTimes[0] || AIRCREW_TIME_DEFAULT;
+    setValue(prefill || fallback);
     modal.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('aircrew-wheel-open');
-    syncValues('instant');
+    document.body.classList.add('aircrew-time-open');
     window.setTimeout(() => {
-      confirmBtn?.focus();
+      if (input) {
+        input.focus();
+        input.select();
+      } else {
+        confirmBtn?.focus();
+      }
     }, 15);
   };
 
-  confirmBtn?.addEventListener('click', confirmSelection);
-  cancelBtn?.addEventListener('click', close);
   overlay?.addEventListener('click', close);
+  closeBtn?.addEventListener('click', close);
+  cancelBtn?.addEventListener('click', close);
+  confirmBtn?.addEventListener('click', confirmSelection);
+  const renderRecents = (recents) => {
+    if (!recentsWrap) return;
+    recentsWrap.innerHTML = '';
+    if (!recents.length) {
+      recentsWrap.hidden = true;
+      if (recentsEmpty) recentsEmpty.hidden = false;
+      if (clearRecentsBtn) clearRecentsBtn.hidden = true;
+      return;
+    }
+    recentsWrap.hidden = false;
+    if (recentsEmpty) recentsEmpty.hidden = true;
+    if (clearRecentsBtn) clearRecentsBtn.hidden = false;
+    recents.forEach((time) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'aircrew-time-preset';
+      btn.setAttribute('data-value', time);
+      btn.textContent = formatAircrewTimeLabel(time);
+      btn.addEventListener('click', () => {
+        // Selecting a preset immediately confirms to avoid the extra Add click
+        setValue(time);
+        confirmSelection();
+      });
+      recentsWrap.appendChild(btn);
+    });
+  };
+  subscribeAircrewRecents(renderRecents);
+  clearRecentsBtn?.addEventListener('click', () => {
+    if (!aircrewRecentTimes.length) return;
+    clearAircrewRecentTimes();
+    showToast('Recent quick times removed');
+  });
+  input?.addEventListener('input', () => {
+    const normalized = normalizeAircrewTimeValue(input.value);
+    if (normalized) {
+      state.lastValue = normalized;
+    }
+  });
   modal.addEventListener('keydown', (evt) => {
     if (modal.getAttribute('aria-hidden') === 'true') return;
     if (evt.key === 'Escape') {
@@ -1107,6 +1160,7 @@ function wireAircrewArrivals() {
       try {
         const data = await postAircrewUpdate('add', carrier, dateKey, { time: timeValue });
         applyAircrewCells(carrier, data.cells);
+        recordAircrewRecentTime(timeValue);
         showToast('Arrival added');
       } catch (err) {
         console.error(err);
@@ -1116,10 +1170,10 @@ function wireAircrewArrivals() {
       }
     };
 
-    if (trigger && aircrewWheel) {
+    if (trigger && aircrewTimePicker) {
       trigger.addEventListener('click', () => {
         if (cell.dataset.saving === '1') return;
-        aircrewWheel.open({
+        aircrewTimePicker.open({
           onConfirm: ({ time24 }) => addArrival(time24),
         });
       });
@@ -1173,7 +1227,7 @@ function initLiveUpdates() {
           if (!item || !item.carrier || !item.date) return;
           const times = Array.isArray(item.times) ? item.times : [];
           const cell = document.querySelector(`.aircrew-table .cell[data-carrier="${item.carrier}"][data-date="${item.date}"]`);
-          if (cell && !document.body.classList.contains('aircrew-wheel-open')) {
+          if (cell && !document.body.classList.contains('aircrew-time-open')) {
             renderAircrewCell(cell, times);
           }
           updateShuttleSuggestionForDate(item.date);
@@ -1848,8 +1902,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initSelectColors();
   updateConflictsUI();
   initUndoCountdown();
-  aircrewWheel = initAircrewWheelPicker();
-  window.aircrewWheel = aircrewWheel;
+  aircrewTimePicker = initAircrewTimePicker();
+  window.aircrewTimePicker = aircrewTimePicker;
   wireAircrewArrivals();
   wireOccupancyInputs();
   wireOccupancyUpload();

@@ -1787,7 +1787,7 @@ def _basic_shift_css_class(label: Optional[str]) -> str:
     if label in TIME_OFF_VALUES:
         return "select-yellow"
     if label == "5AM–12PM":
-        return "select-green"
+        return "select-gold"
     if label == "6AM–12PM":
         return "select-blue"
     if label == "7AM–12PM":

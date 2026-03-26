@@ -72,49 +72,6 @@
 
     <section class="tables">
       <div class="table-card">
-        <div class="table-title">Breakfast Bar</div>
-        <div class="schedule-table" role="table" aria-label="Breakfast Bar">
-          <div class="row header" role="row">
-            <div class="cell head sticky" role="columnheader">Employees</div>
-            {% for d in week.dates %}
-              <div class="cell head {% if bb_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
-            {% endfor %}
-          </div>
-          {% for emp in breakfast.employees %}
-            {% set emp_id = breakfast.employee_ids.get(emp) %}
-            <div class="row" role="row">
-              <div class="cell sticky" role="rowheader">{{ emp }}</div>
-              {% for d in week.dates %}
-                {% set val = breakfast.assignments[emp][d.key] %}
-                {% set options = breakfast.employee_shifts.get(emp, breakfast.shifts) %}
-                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
-                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls = val | shift_class %}
-                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
-                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
-                    {% for opt in options %}
-                      {% if opt == 'TIME OFF' %}
-                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
-                      {% elif opt == 'REQ VAC' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
-                      {% else %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
-                      {% endif %}
-                    {% endfor %}
-                    <option value="__custom__">Custom time…</option>
-                    {% if val and (val not in options) %}
-                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
-                    {% endif %}
-                  </select>
-                </div>
-              {% endfor %}
-            </div>
-          {% endfor %}
-        </div>
-      </div>
-
-      <div class="table-card">
         <div class="table-title">Front Desk</div>
         <div class="schedule-table" role="table" aria-label="Front Desk">
           <div class="row header" role="row">
@@ -156,6 +113,55 @@
               {% endfor %}
             </div>
           {% endfor %}
+        </div>
+      </div>
+
+      {% set occupancy_values = occupancy.get('values') if occupancy else {} %}
+      <div class="table-card occupancy-card">
+        <div class="table-title occupancy-title">
+          <span>Occupancy</span>
+          <div class="occupancy-actions">
+            <button type="button" class="occupancy-upload-btn" id="occupancy-upload-trigger" aria-label="Upload occupancy report">
+              <span aria-hidden="true">⭱</span>
+            </button>
+            <input type="file" id="occupancy-upload-input" accept=".txt,.tsv,.csv" hidden>
+            <span class="occupancy-upload-status" id="occupancy-upload-status" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="schedule-table occupancy-table" role="table" aria-label="Occupancy">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Metric</div>
+            {% for d in week.dates %}
+              <div class="cell head" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          <div class="row" role="row">
+            <div class="cell sticky" role="rowheader">Hotel Occupancy</div>
+            {% for d in week.dates %}
+              {% set pct = occupancy_values.get(d.key) %}
+              <div class="cell occupancy-cell {% if pct is none %}empty{% endif %}" role="cell" data-date="{{ d.key }}" data-label="{{ d.label_long }}"{% if pct is not none %} data-value="{{ pct }}"{% endif %}>
+                <label class="occupancy-input-wrap">
+                  <input type="number"
+                         class="occupancy-input"
+                         min="0"
+                         max="100"
+                         step="1"
+                         inputmode="numeric"
+                         placeholder="0-100"
+                         value="{% if pct is not none %}{{ pct }}{% endif %}"
+                         aria-label="Set occupancy for {{ d.label_long }}">
+                  <span class="occupancy-input-suffix">%</span>
+                </label>
+                <span class="occupancy-cell-hint" aria-live="polite">
+                  {% if pct is not none %}
+                    Saved {{ pct }}%
+                  {% else %}
+                    Not set
+                  {% endif %}
+                </span>
+              </div>
+            {% endfor %}
+          </div>
         </div>
       </div>
       
@@ -210,6 +216,49 @@
         </div>
       </div>
 
+      <div class="table-card">
+        <div class="table-title">Breakfast Bar</div>
+        <div class="schedule-table" role="table" aria-label="Breakfast Bar">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Employees</div>
+            {% for d in week.dates %}
+              <div class="cell head {% if bb_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          {% for emp in breakfast.employees %}
+            {% set emp_id = breakfast.employee_ids.get(emp) %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ emp }}</div>
+              {% for d in week.dates %}
+                {% set val = breakfast.assignments[emp][d.key] %}
+                {% set options = breakfast.employee_shifts.get(emp, breakfast.shifts) %}
+                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
+                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
+                {% set sel_cls = val | shift_class %}
+                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
+                    {% for opt in options %}
+                      {% if opt == 'TIME OFF' %}
+                        {% set req_label = 'REQ VAC' if (vac and dismissed) else 'REQ OFF' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
+                      {% elif opt == 'REQ VAC' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC</option>
+                      {% else %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
+                      {% endif %}
+                    {% endfor %}
+                    <option value="__custom__">Custom time…</option>
+                    {% if val and (val not in options) %}
+                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                    {% endif %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+
       {% if aircrew and aircrew.carriers %}
       {% set aircrew_arrivals = aircrew.arrivals if aircrew.arrivals is defined else {} %}
       <div class="table-card">
@@ -247,102 +296,48 @@
           {% endfor %}
         </div>
       </div>
-      <div class="aircrew-wheel-modal" id="aircrew-wheel-modal" aria-hidden="true">
-        <div class="aircrew-wheel-overlay"></div>
-        <div class="aircrew-wheel-dialog" role="dialog" aria-modal="true" aria-labelledby="aircrew-wheel-title">
-          <div class="aircrew-wheel-card">
-            <div class="aircrew-wheel-header">
-              <div class="aircrew-wheel-title" id="aircrew-wheel-title">Select arrival time</div>
+      <div class="aircrew-time-modal" id="aircrew-time-modal" aria-hidden="true">
+        <div class="aircrew-time-overlay" aria-hidden="true"></div>
+        <div class="aircrew-time-dialog" role="dialog" aria-modal="true" aria-labelledby="aircrew-time-title">
+          <div class="aircrew-time-card">
+            <div class="aircrew-time-header">
+              <div class="aircrew-time-title" id="aircrew-time-title">Add arrival time</div>
+              <button type="button" class="aircrew-time-close" aria-label="Close time picker">&times;</button>
             </div>
-            <div class="aircrew-wheel-viewport">
-              <div class="aircrew-wheel-highlight" aria-hidden="true"></div>
-              <span class="aircrew-wheel-guide aircrew-wheel-guide--top" aria-hidden="true">▲</span>
-              <span class="aircrew-wheel-guide aircrew-wheel-guide--bottom" aria-hidden="true">▼</span>
-              <div class="aircrew-wheel-columns">
-                <div class="aircrew-wheel-column aircrew-wheel-column--hour">
-                  <ul class="aircrew-wheel-list" data-wheel="hour">
-                    {% for h in range(1, 13) %}
-                      <li class="aircrew-wheel-item" data-value="{{ h }}">{{ h }}</li>
-                    {% endfor %}
-                  </ul>
+            <div class="aircrew-time-body">
+              <label class="aircrew-time-label" for="aircrew-time-input">Arrival time</label>
+              <input type="time"
+                     id="aircrew-time-input"
+                     class="aircrew-time-input"
+                     step="60"
+                     required
+                     aria-describedby="aircrew-time-help">
+              <div class="aircrew-time-help" id="aircrew-time-help">Enter any HH:MM time or pick a recent one.</div>
+              <div class="aircrew-time-quick">
+                <div class="aircrew-time-quick-header">
+                  <div class="aircrew-time-quick-label" id="aircrew-time-recents-label">Recent times</div>
+                  <button type="button"
+                          class="btn ghost sm aircrew-time-recents-clear"
+                          id="aircrew-time-recents-clear"
+                          aria-label="Remove recent quick times"
+                          hidden>Remove recents</button>
                 </div>
-                <div class="aircrew-wheel-column aircrew-wheel-column--minute">
-                  <ul class="aircrew-wheel-list" data-wheel="minute">
-                    {% for m in [0, 15, 30, 45] %}
-                      <li class="aircrew-wheel-item" data-value="{{ '%02d' % m }}">{{ '%02d' % m }}</li>
-                    {% endfor %}
-                  </ul>
-                </div>
-                <div class="aircrew-wheel-column aircrew-wheel-column--period">
-                  <ul class="aircrew-wheel-list" data-wheel="period">
-                    {% for p in ['AM', 'PM'] %}
-                      <li class="aircrew-wheel-item" data-value="{{ p }}">{{ p }}</li>
-                    {% endfor %}
-                  </ul>
-                </div>
+                <div class="aircrew-time-presets"
+                     id="aircrew-time-recents"
+                     role="group"
+                     aria-labelledby="aircrew-time-recents-label"
+                     hidden></div>
+                <div class="aircrew-time-recents-empty" id="aircrew-time-recents-empty">Times you add will show up here.</div>
               </div>
             </div>
-            <div class="aircrew-wheel-actions">
-              <button type="button" class="aircrew-wheel-action aircrew-wheel-confirm" aria-label="Confirm arrival time">
-                <span aria-hidden="true">✔</span>
-              </button>
-              <button type="button" class="aircrew-wheel-action aircrew-wheel-cancel" aria-label="Cancel">
-                <span aria-hidden="true">✕</span>
-              </button>
+            <div class="aircrew-time-actions">
+              <button type="button" class="btn ghost aircrew-time-cancel">Cancel</button>
+              <button type="button" class="btn primary aircrew-time-confirm">Add arrival</button>
             </div>
           </div>
         </div>
       </div>
       {% endif %}
-
-      {% set occupancy_values = occupancy.get('values') if occupancy else {} %}
-      <div class="table-card occupancy-card">
-        <div class="table-title occupancy-title">
-          <span>Occupancy</span>
-          <div class="occupancy-actions">
-            <button type="button" class="occupancy-upload-btn" id="occupancy-upload-trigger" aria-label="Upload occupancy report">
-              <span aria-hidden="true">⭱</span>
-            </button>
-            <input type="file" id="occupancy-upload-input" accept=".txt,.tsv,.csv" hidden>
-            <span class="occupancy-upload-status" id="occupancy-upload-status" aria-live="polite"></span>
-          </div>
-        </div>
-        <div class="schedule-table occupancy-table" role="table" aria-label="Occupancy">
-          <div class="row header" role="row">
-            <div class="cell head sticky" role="columnheader">Metric</div>
-            {% for d in week.dates %}
-              <div class="cell head" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
-            {% endfor %}
-          </div>
-          <div class="row" role="row">
-            <div class="cell sticky" role="rowheader">Hotel Occupancy</div>
-            {% for d in week.dates %}
-              {% set pct = occupancy_values.get(d.key) %}
-              <div class="cell occupancy-cell {% if pct is none %}empty{% endif %}" role="cell" data-date="{{ d.key }}" data-label="{{ d.label_long }}"{% if pct is not none %} data-value="{{ pct }}"{% endif %}>
-                <label class="occupancy-input-wrap">
-                  <input type="number"
-                         class="occupancy-input"
-                         min="0"
-                         max="100"
-                         step="1"
-                         inputmode="numeric"
-                         placeholder="0-100"
-                         value="{% if pct is not none %}{{ pct }}{% endif %}"
-                         aria-label="Set occupancy for {{ d.label_long }}">
-                  <span class="occupancy-input-suffix">%</span>
-                </label>
-                <span class="occupancy-cell-hint" aria-live="polite">
-                  {% if pct is not none %}
-                    Saved {{ pct }}%
-                  {% else %}
-                    Not set
-                  {% endif %}
-                </span>
-              </div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
 
       {% if maintenance %}
       <div class="table-card">
