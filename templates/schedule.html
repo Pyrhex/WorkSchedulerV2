@@ -253,12 +253,15 @@
       </div>
 
       <div class="table-card">
-        <div class="table-title">Breakfast Bar</div>
+        <div class="table-title breakfast-title">
+          <span>Breakfast Bar</span>
+          <span class="breakfast-warning-note" id="breakfast-order-warning"{% if not bb_order_warning_active %} hidden{% endif %}>Merve cannot be scheduled earlier than Eurielle.</span>
+        </div>
         <div class="schedule-table" role="table" aria-label="Breakfast Bar">
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Employees</div>
             {% for d in week.dates %}
-              <div class="cell head {% if bb_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+              <div class="cell head {% if bb_missing[d.key] %}missing{% elif bb_order_warnings[d.key] %}order-warning{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
             {% endfor %}
           </div>
           {% for emp in breakfast.employees %}

@@ -270,6 +270,7 @@ function updateCoverageUI(data) {
     variant_counts,
     shuttle_missing,
     bb_missing,
+    bb_order_warnings,
     maintenance_missing,
     fd_duplicates,
   } = data;
@@ -305,8 +306,18 @@ function updateCoverageUI(data) {
     .forEach(h => {
       const dk = h.getAttribute('data-date');
       if (!dk) return;
-      if (bb_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
+      h.classList.remove('missing', 'order-warning');
+      if (bb_missing?.[dk]) {
+        h.classList.add('missing');
+      } else if (bb_order_warnings?.[dk]) {
+        h.classList.add('order-warning');
+      }
     });
+  const breakfastOrderWarning = document.getElementById('breakfast-order-warning');
+  if (breakfastOrderWarning) {
+    const showBreakfastOrderWarning = Object.values(bb_order_warnings || {}).some(Boolean);
+    breakfastOrderWarning.hidden = !showBreakfastOrderWarning;
+  }
 
   // Update Maintenance headers using Maintenance missing map
   document

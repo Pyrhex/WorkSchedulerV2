@@ -1285,7 +1285,7 @@ def has_generated_schedule(week_id: int) -> bool:
         return any_non_set is not None
 
 
-def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict, dict, dict, int, dict]:
+def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict, dict, dict, dict, int, dict]:
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         dates = [d.isoformat() for d in daterange(wk.start_date, 7)]
@@ -1304,6 +1304,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         bb_variants = ["5AM–12PM", "6AM–12PM", "7AM–12PM"]
         bb_counts = {k: {variant: 0 for variant in bb_variants} for k in dates}
         bb_missing = {k: False for k in dates}
+        bb_order_warnings = {k: False for k in dates}
 
         # Initialize Maintenance counts (1 per day required)
         maint_counts = {k: 0 for k in dates}
@@ -1313,6 +1314,8 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         fd_duplicates = {k: False for k in dates}
         # Exact label counts per date and variant for Front Desk
         fd_label_counts: dict[str, dict[str, dict[str, int]]] = {k: {"AM": {}, "PM": {}, "Audit": {}} for k in dates}
+        employee_names = dict(s.execute(select(Employee.id, Employee.name)).all())
+        target_breakfast_shifts: dict[str, dict[str, str]] = {k: {} for k in dates}
         
         # Count Front Desk assignments per shift variant per day
         # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
@@ -1354,6 +1357,10 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             # Breakfast variants (exact labels)
             if a.value in bb_variants:
                 bb_counts[date_key][a.value] += 1
+
+            employee_name = employee_names.get(a.employee_id)
+            if employee_name in {"Merve", "Eurielle"}:
+                target_breakfast_shifts[date_key][employee_name] = a.value
 
             # Maintenance (single variant)
             if a.value == "8AM–4:30PM":
@@ -1397,6 +1404,20 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                     break
         bb_required = 3
 
+        for date_key in dates:
+            merve_shift = target_breakfast_shifts[date_key].get("Merve")
+            eurielle_shift = target_breakfast_shifts[date_key].get("Eurielle")
+            if not merve_shift or not eurielle_shift:
+                continue
+            if not _is_breakfast_shift_value(merve_shift) or not _is_breakfast_shift_value(eurielle_shift):
+                continue
+            merve_start = _shift_start_minutes(merve_shift)
+            eurielle_start = _shift_start_minutes(eurielle_shift)
+            if merve_start is None or eurielle_start is None:
+                continue
+            if merve_start < eurielle_start:
+                bb_order_warnings[date_key] = True
+
         # Maintenance missing threshold (1 per day)
         for date_key in dates:
             if maint_counts[date_key] < 1:
@@ -1414,6 +1435,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             bb_missing,
             bb_required,
             bb_counts,
+            bb_order_warnings,
             fd_duplicates,
             maint_missing,
             maint_required,
@@ -1711,6 +1733,7 @@ def index():
         bb_missing,
         bb_required,
         bb_counts,
+        bb_order_warnings,
         fd_duplicates,
         maintenance_missing,
         maintenance_required,
@@ -1737,6 +1760,8 @@ def index():
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
+        bb_order_warnings=bb_order_warnings,
+        bb_order_warning_active=any(bb_order_warnings.values()),
         maintenance_missing=maintenance_missing,
         maintenance_required=maintenance_required,
         maintenance_counts=maintenance_counts,
@@ -1794,6 +1819,17 @@ def _shift_time_points(label: Optional[str]) -> list[int]:
 def _shift_start_minutes(label: Optional[str]) -> Optional[int]:
     times = _shift_time_points(label)
     return times[0] if times else None
+
+
+def _is_breakfast_shift_value(label: Optional[str]) -> bool:
+    if not label or label in NEUTRAL_ASSIGNMENT_VALUES:
+        return False
+    if label in BREAKFAST_SHIFTS:
+        return label not in {"Set", TIME_OFF_LABEL, REQ_VAC_LABEL}
+    start, end = _shift_window_minutes(label)
+    if start is None or end is None:
+        return False
+    return start < (12 * 60) and (end % (24 * 60)) == (12 * 60)
 
 
 def _shift_window_minutes(label: Optional[str]) -> tuple[Optional[int], Optional[int]]:
@@ -2036,6 +2072,7 @@ def view_week(week_id: int):
         bb_missing,
         bb_required,
         bb_counts,
+        bb_order_warnings,
         fd_duplicates,
         maintenance_missing,
         maintenance_required,
@@ -2062,6 +2099,8 @@ def view_week(week_id: int):
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
+        bb_order_warnings=bb_order_warnings,
+        bb_order_warning_active=any(bb_order_warnings.values()),
         maintenance_missing=maintenance_missing,
         maintenance_required=maintenance_required,
         maintenance_counts=maintenance_counts,
@@ -2088,112 +2127,99 @@ def _fd_variant(label: str) -> Optional[str]:
 
 @app.route("/week/<int:week_id>/manager-meals")
 def manager_meals(week_id: int):
-    # Build a map of day -> {variant -> list of employee names on that FD shift}
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         if not wk:
             return redirect(url_for("view_week", week_id=week_id))
-
-        # Pull all assignments for the week and map by day/variant
-        by_day: dict[date, dict[str, list[str]]] = {}
-        rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
-        # Preload employee id -> name for efficiency
-        emp_name = {e.id: e.name for e in s.scalars(select(Employee))}
-        for a in rows:
-            if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
-                continue
-            variant = _fd_variant(a.value)
-            if not variant:
-                continue
-            # Only consider Front Desk-like labels
-            if variant not in ("AM", "PM", "Audit"):
-                continue
-            nm = emp_name.get(a.employee_id)
-            if not nm:
-                continue
-            by_day.setdefault(a.date, {}).setdefault(variant, []).append(nm)
-
-        # Decide manager meal recipient per day/variant using seniority
-        # AM Sunday-Thursday override goes to JoJo regardless of schedule
-        results: list[dict] = []
-        for d in daterange(wk.start_date, 7):
-            entry = {
-                "date": d,
-                "label": d.strftime("%a %m/%d"),
-                "AM": None,
-                "PM": None,
-                "Audit": None,
-            }
-            # AM override: Sunday (6) through Thursday (3)
-            if d.weekday() in (6, 0, 1, 2, 3):
-                entry["AM"] = "JoJo"
-            else:
-                am_list = by_day.get(d, {}).get("AM", [])
-                entry["AM"] = next((n for n in SENIORITY_ORDER if n in am_list), (am_list[0] if am_list else None))
-            # PM and Audit by seniority among assigned that shift
-            for variant in ("PM", "Audit"):
-                names = by_day.get(d, {}).get(variant, [])
-                chosen = next((n for n in SENIORITY_ORDER if n in names), (names[0] if names else None))
-                entry[variant] = chosen
-            results.append(entry)
-
-        # Build simple copy-friendly rows: Date -> "Night, AM, PM"
-        rows: list[tuple[str, str]] = []
-        for e in results:
-            date_str = e["date"].strftime("%a %m/%d")
-            audit = e.get("Audit") or "-"
-            am = e.get("AM") or "-"
-            pm = e.get("PM") or "-"
-            rows.append((date_str, f"{audit}, {am}, {pm}"))
-
+        rows = _manager_meal_rows(s, wk.start_date)
         return render_template(
             "meals.html",
             rows=rows,
             error=None,
         )
 
+def _manager_meal_date_range(anchor_date: date) -> list[date]:
+    sunday_offset = (6 - anchor_date.weekday()) % 7
+    sunday_start = anchor_date + timedelta(days=sunday_offset)
+    return list(daterange(sunday_start, 7))
 
-@app.route("/week/<int:week_id>/manager-meals.txt")
-def manager_meals_text(week_id: int):
-    # Plain-text export in format: Date: Audit, AM, PM
-    with SessionLocal() as s:
-        wk = s.get(Week, week_id)
-        if not wk:
-            return redirect(url_for("view_week", week_id=week_id))
 
-        # Build assignments by day/variant
-        by_day: dict[date, dict[str, list[str]]] = {}
-        rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
-        emp_name = {e.id: e.name for e in s.scalars(select(Employee))}
-        for a in rows:
+def _manager_meal_rows(s: Session, anchor_date: date) -> list[tuple[str, str]]:
+    target_dates = _manager_meal_date_range(anchor_date)
+    target_week_starts = {week_start_for_date(d) for d in target_dates}
+    target_weeks = list(s.scalars(select(Week).where(Week.start_date.in_(target_week_starts))))
+    week_ids = [w.id for w in target_weeks]
+    front_desk = s.scalar(select(Section).where(Section.name == "Front Desk"))
+    employees = (
+        list(s.scalars(select(Employee).where(Employee.section_id == front_desk.id)))
+        if front_desk
+        else []
+    )
+    eligible_employee_ids = {e.id for e in employees}
+    emp_name = {e.id: e.name for e in employees}
+    emp_seniority = {e.name: e.seniority for e in employees}
+    legacy_rank = {name: idx for idx, name in enumerate(SENIORITY_ORDER)}
+
+    by_day: dict[date, dict[str, list[tuple[str, str]]]] = {}
+    if week_ids:
+        assignments = list(
+            s.scalars(
+                select(Assignment).where(
+                    Assignment.week_id.in_(week_ids),
+                    Assignment.date >= target_dates[0],
+                    Assignment.date <= target_dates[-1],
+                )
+            )
+        )
+        for a in assignments:
             if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
-            variant = _fd_variant(a.value)
-            if not variant:
+            if a.employee_id not in eligible_employee_ids:
                 continue
+            variant = _fd_variant(a.value)
             if variant not in ("AM", "PM", "Audit"):
                 continue
             nm = emp_name.get(a.employee_id)
             if not nm:
                 continue
-            by_day.setdefault(a.date, {}).setdefault(variant, []).append(nm)
+            by_day.setdefault(a.date, {}).setdefault(variant, []).append((nm, a.value))
 
-        lines: list[str] = []
-        for d in daterange(wk.start_date, 7):
-            # Decide AM
-            if d.weekday() in (6, 0, 1, 2, 3):
-                am_name = "JoJo"
-            else:
-                am_list = by_day.get(d, {}).get("AM", [])
-                am_name = next((n for n in SENIORITY_ORDER if n in am_list), (am_list[0] if am_list else None))
-            # PM and Audit
-            def pick(variant: str) -> Optional[str]:
-                names = by_day.get(d, {}).get(variant, [])
-                return next((n for n in SENIORITY_ORDER if n in names), (names[0] if names else None))
-            audit_name = pick("Audit")
-            pm_name = pick("PM")
-            label = d.strftime("%a %m/%d")
-            lines.append(f"{label}: {audit_name or '-'}, {am_name or '-'}, {pm_name or '-'}")
+    def pick(entries: list[tuple[str, str]]) -> Optional[str]:
+        if not entries:
+            return None
+        chosen_name, _ = min(
+            entries,
+            key=lambda entry: (
+                -(emp_seniority.get(entry[0]) if emp_seniority.get(entry[0]) is not None else -1),
+                _shift_start_minutes(entry[1]) if _shift_start_minutes(entry[1]) is not None else 10_000,
+                legacy_rank.get(entry[0], 9999),
+                entry[0],
+            ),
+        )
+        return chosen_name
+
+    rows: list[tuple[str, str]] = []
+    for d in target_dates:
+        if d.weekday() in (6, 0, 1, 2, 3):
+            am_name = "JoJo"
+        else:
+            am_entries = by_day.get(d, {}).get("AM", [])
+            am_name = pick(am_entries)
+
+        audit_name = pick(by_day.get(d, {}).get("Audit", []))
+        pm_name = pick(by_day.get(d, {}).get("PM", []))
+        label = d.strftime("%a %m/%d")
+        rows.append((label, f"{audit_name or '-'}, {am_name or '-'}, {pm_name or '-'}"))
+    return rows
+
+
+@app.route("/week/<int:week_id>/manager-meals.txt")
+def manager_meals_text(week_id: int):
+    with SessionLocal() as s:
+        wk = s.get(Week, week_id)
+        if not wk:
+            return redirect(url_for("view_week", week_id=week_id))
+        lines = [f"{date_str}: {names}" for date_str, names in _manager_meal_rows(s, wk.start_date)]
 
         text = "\n".join(lines)
         return Response(text, mimetype="text/plain")
@@ -2704,6 +2730,7 @@ def timeoff_new():
                     bb_missing,
                     bb_required,
                     bb_counts,
+                    bb_order_warnings,
                     fd_duplicates,
                     maintenance_missing,
                     maintenance_required,
@@ -2731,6 +2758,7 @@ def timeoff_new():
                     "bb_missing": bb_missing,
                     "bb_required": bb_required,
                     "bb_counts": bb_counts,
+                    "bb_order_warnings": bb_order_warnings,
                     "fd_duplicates": fd_duplicates,
                     "maintenance_missing": maintenance_missing,
                     "maintenance_required": maintenance_required,
@@ -2891,6 +2919,7 @@ def assign():
         bb_missing,
         bb_required,
         bb_counts,
+        bb_order_warnings,
         fd_duplicates,
         maintenance_missing,
         maintenance_required,
@@ -2908,6 +2937,7 @@ def assign():
         "bb_missing": bb_missing,
         "bb_required": bb_required,
         "bb_counts": bb_counts,
+        "bb_order_warnings": bb_order_warnings,
         "fd_duplicates": fd_duplicates,
         "maintenance_missing": maintenance_missing,
         "maintenance_required": maintenance_required,
@@ -3479,6 +3509,7 @@ def delete_timeoff(tid):
                 bb_missing,
                 bb_required,
                 bb_counts,
+                bb_order_warnings,
                 fd_duplicates,
                 maintenance_missing,
                 maintenance_required,
@@ -3507,6 +3538,7 @@ def delete_timeoff(tid):
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
+                "bb_order_warnings": bb_order_warnings,
                 "fd_duplicates": fd_duplicates,
                 "maintenance_missing": maintenance_missing,
                 "maintenance_required": maintenance_required,
@@ -3525,6 +3557,7 @@ def delete_timeoff(tid):
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
+                "bb_order_warnings": bb_order_warnings,
                 "fd_duplicates": fd_duplicates,
                 "maintenance_missing": maintenance_missing,
                 "maintenance_required": maintenance_required,
@@ -3569,6 +3602,7 @@ def toggle_timeoff():
                 bb_missing,
                 bb_required,
                 bb_counts,
+                bb_order_warnings,
                 fd_duplicates,
                 maintenance_missing,
                 maintenance_required,
@@ -3586,6 +3620,7 @@ def toggle_timeoff():
             bb_missing = {}
             bb_required = 0
             bb_counts = {}
+            bb_order_warnings = {}
             fd_duplicates = {}
             maintenance_missing = {}
             maintenance_required = 0
@@ -3618,6 +3653,7 @@ def toggle_timeoff():
             "bb_missing": bb_missing,
             "bb_required": bb_required,
             "bb_counts": bb_counts,
+            "bb_order_warnings": bb_order_warnings,
             "fd_duplicates": fd_duplicates,
             "maintenance_missing": maintenance_missing,
             "maintenance_required": maintenance_required,
@@ -3637,6 +3673,7 @@ def toggle_timeoff():
         "bb_missing": bb_missing,
         "bb_required": bb_required,
         "bb_counts": bb_counts,
+        "bb_order_warnings": bb_order_warnings,
         "fd_duplicates": fd_duplicates,
         "maintenance_missing": maintenance_missing,
         "maintenance_required": maintenance_required,
@@ -3690,6 +3727,7 @@ def toggle_timeoff_vacation():
                 bb_missing,
                 bb_required,
                 bb_counts,
+                bb_order_warnings,
                 fd_duplicates,
                 maintenance_missing,
                 maintenance_required,
@@ -3709,6 +3747,7 @@ def toggle_timeoff_vacation():
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
+                "bb_order_warnings": bb_order_warnings,
                 "fd_duplicates": fd_duplicates,
                 "maintenance_missing": maintenance_missing,
                 "maintenance_required": maintenance_required,

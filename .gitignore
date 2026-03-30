@@ -3,3 +3,5 @@ schedule.db
 log.txt
 .env
 old_schedule_templates/
+/static/whatsapp-media/*
+__pycache__/*
