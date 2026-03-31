@@ -27,6 +27,10 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=ASSET_VERSION) }}" />
   </head>
   <body>
+    {% set db_switched = request.args.get('db_switched') %}
+    {% set db_switched_label = 'Production' if db_switched == 'production' else 'Development' if db_switched == 'development' else '' %}
+    {% set db_switch_error = request.args.get('db_switch_error') %}
+    {% set db_switch_error_message = 'Database password is not configured in .env.' if db_switch_error == 'password_not_configured' else 'Incorrect database password.' if db_switch_error == 'invalid_password' else '' %}
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand"><a href="/" style="color:inherit;text-decoration:none;">Scheduling System</a></div>
@@ -36,6 +40,17 @@
             <a href="/timeoff" class="{{ 'active' if request.path.startswith('/timeoff') else '' }}">Time Off</a>
             <a href="/schedules" class="{{ 'active' if request.path.startswith('/schedules') else '' }}">Schedules</a>
           </nav>
+          <form method="post" action="/admin/database" class="database-switcher-form database-switcher-form-inline" id="database-switcher-form">
+            <input type="hidden" name="next" value="{{ request.path }}" />
+            <input type="hidden" name="database_password" id="database-password-input" value="" />
+            <label for="database-select" class="sr-only">Choose database</label>
+            <span class="database-switcher-label">Database</span>
+            <select id="database-select" name="database" class="database-switcher-select database-switcher-select-inline">
+              {% for option in database_options %}
+                <option value="{{ option.value }}" {% if option.value == active_database_choice %}selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </form>
           <button type="button" id="theme-toggle" class="theme-toggle-btn" aria-pressed="false">
             <span class="theme-toggle-track" aria-hidden="true">
               <span class="theme-toggle-thumb"></span>
@@ -47,6 +62,12 @@
     </header>
 
     <main class="content">
+      {% if db_switched_label %}
+        <section class="database-switcher-status" id="database-switcher-status" aria-label="Database switch status">Switched to {{ db_switched_label }}.</section>
+      {% endif %}
+      {% if db_switch_error_message %}
+        <section class="database-switcher-status database-switcher-status-error" id="database-switcher-status" aria-label="Database switch error">{{ db_switch_error_message }}</section>
+      {% endif %}
       {% block content %}{% endblock %}
     </main>
 
@@ -58,6 +79,44 @@
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+    <script>
+      (function () {
+        var form = document.getElementById("database-switcher-form");
+        var select = document.getElementById("database-select");
+        var passwordInput = document.getElementById("database-password-input");
+        var status = document.getElementById("database-switcher-status");
+        if (!form || !select || !passwordInput) {
+          if (status) {
+            window.setTimeout(function () {
+              status.remove();
+            }, 10000);
+          }
+          return;
+        }
+        var previousValue = select.value;
+        select.addEventListener("change", function () {
+          var nextValue = select.value;
+          if (nextValue !== "production") {
+            var enteredPassword = window.prompt("Enter the database password to switch environments:", "");
+            if (enteredPassword === null) {
+              select.value = previousValue;
+              passwordInput.value = "";
+              return;
+            }
+            passwordInput.value = enteredPassword;
+          } else {
+            passwordInput.value = "";
+          }
+          previousValue = nextValue;
+          form.requestSubmit();
+        });
+        if (status) {
+          window.setTimeout(function () {
+            status.remove();
+          }, 10000);
+        }
+      })();
+    </script>
     <script src="/static/js/app.js"></script>
   </body>
   </html>

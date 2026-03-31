@@ -1,5 +1,7 @@
 venv
 schedule.db
+schedule.dev.db
+schedule.test.db
 log.txt
 .env
 old_schedule_templates/

@@ -147,6 +147,62 @@ body {
 .content { max-width: 1600px; margin: 16px auto; padding: 8px 16px; }
 .content-inner { margin-right: 380px; }
 .content-inner.full-width { margin-right: 0; }
+.database-switcher-form { margin: 0; }
+.database-switcher-form-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.database-switcher-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+.database-switcher-select {
+  min-width: 160px;
+  border: 1px solid var(--grid);
+  border-radius: 999px;
+  background: var(--select-bg);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 34px 8px 12px;
+  cursor: pointer;
+}
+.database-switcher-select-inline {
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: #ffffff;
+  padding: 0 18px 0 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.database-switcher-status {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.database-switcher-status-error {
+  color: var(--danger);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 .sidebar {
   position: fixed;
@@ -962,4 +1018,18 @@ body.aircrew-time-open {
 @media (max-width: 1100px) {
   .content-inner { margin-right: 0; }
   .sidebar { position: static; width: auto; height: auto; box-shadow: none; }
+  .topbar-inner {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .topbar-actions {
+    flex-wrap: wrap;
+  }
+  .database-switcher-form-inline {
+    order: 3;
+  }
+  .database-switcher-select-inline {
+    min-width: 120px;
+  }
 }

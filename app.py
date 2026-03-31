@@ -10,6 +10,7 @@ import shutil
 import time
 import uuid
 from copy import copy as copy_style
+from threading import RLock
 from functools import lru_cache
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
@@ -50,6 +51,71 @@ WHATSAPP_MEDIA_DIR = Path(app.root_path) / WHATSAPP_MEDIA_RELATIVE
 WHATSAPP_MEDIA_MAX_AGE_SECONDS = 24 * 60 * 60
 
 AIRCREW_LATE_NIGHT_MINUTES = 60  # Minutes past midnight treated as a "late night" slot
+
+DATABASE_CHOICES = {
+    "production": {
+        "label": "Production",
+        "filename": "schedule.db",
+    },
+    "development": {
+        "label": "Development",
+        "filename": "schedule.dev.db",
+    },
+}
+DATABASE_SWITCH_LOCK = RLock()
+
+
+def _sqlite_database_url(filename: str) -> str:
+    return f"sqlite:///{(BASE_DIR / filename).resolve().as_posix()}"
+
+
+def _default_database_url(app_env: str) -> str:
+    normalized = _normalize_database_choice(app_env)
+    return _sqlite_database_url(DATABASE_CHOICES[normalized]["filename"])
+
+
+def _normalize_database_choice(value: Optional[str]) -> str:
+    normalized = (value or "production").strip().lower()
+    aliases = {
+        "dev": "development",
+        "test": "development",
+        "testing": "development",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in DATABASE_CHOICES else "production"
+
+
+def _database_label(choice: str) -> str:
+    return DATABASE_CHOICES[_normalize_database_choice(choice)]["label"]
+
+
+def _database_switch_password() -> str:
+    return (os.getenv("DATABASE_SWITCH_PASSWORD") or "").strip()
+
+
+def _set_active_database(choice: str) -> None:
+    global APP_ENV, DATABASE_URL, engine
+
+    normalized = _normalize_database_choice(choice)
+    database_url = _default_database_url(normalized)
+    with DATABASE_SWITCH_LOCK:
+        old_engine = engine
+        new_engine = create_engine(database_url, future=True)
+        SessionLocal.configure(bind=new_engine)
+        engine = new_engine
+        APP_ENV = normalized
+        DATABASE_URL = database_url
+        app.config["APP_ENV"] = normalized
+        app.config["DATABASE_URL"] = database_url
+        init_db_once()
+        if old_engine is not new_engine:
+            old_engine.dispose()
+
+
+APP_ENV = (os.getenv("APP_ENV") or "production").strip().lower()
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip() or _default_database_url(APP_ENV)
+app.config["APP_ENV"] = APP_ENV
+app.config["DATABASE_URL"] = DATABASE_URL
 
 class TwilioWhatsAppError(RuntimeError):
     """Raised when the Twilio WhatsApp API reports an error."""
@@ -143,6 +209,35 @@ def _redirect_with_template_status(target_url: str, status: str, message: str) -
     query_items["template_message"] = trimmed_message
     parsed[4] = urlencode(query_items)
     return redirect(urlunparse(parsed))
+
+
+def _redirect_with_query_params(target_url: str, **params: str) -> Response:
+    parsed = list(urlparse(target_url or "/"))
+    query_items = dict(parse_qsl(parsed[4], keep_blank_values=True))
+    for key, value in params.items():
+        if value is None:
+            query_items.pop(key, None)
+        else:
+            query_items[key] = value
+    parsed[4] = urlencode(query_items)
+    return redirect(urlunparse(parsed))
+
+
+@app.context_processor
+def inject_database_switcher() -> dict[str, Any]:
+    current_choice = _normalize_database_choice(app.config.get("APP_ENV"))
+    options = [
+        {
+            "value": value,
+            "label": meta["label"],
+        }
+        for value, meta in DATABASE_CHOICES.items()
+    ]
+    return {
+        "database_options": options,
+        "active_database_choice": current_choice,
+        "active_database_label": _database_label(current_choice),
+    }
 
 
 def _send_twilio_whatsapp_image(config: dict[str, str], *, media_url: str, caption: Optional[str]) -> None:
@@ -338,7 +433,7 @@ class ScheduleTemplate(Base):
     )
 
 
-engine = create_engine("sqlite:///schedule.db", future=True)
+engine = create_engine(DATABASE_URL, future=True)
 SessionLocal = sessionmaker(bind=engine, future=True, expire_on_commit=False)
 
 
@@ -980,77 +1075,77 @@ def ensure_employee_sort_orders(session: Session, section_ids: Optional[Iterable
 def init_db_once():
     Base.metadata.create_all(engine)
     with SessionLocal() as s:
-        # Ensure new columns exist for employees (SQLite light migration)
-        with engine.connect() as conn:
-            cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(employees)").fetchall()]
-            if "availability" not in cols:
-                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN availability TEXT")
-            if "preferred_shift" not in cols:
-                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN preferred_shift TEXT")
-            if "seniority" not in cols:
-                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN seniority INTEGER")
-            to_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(timeoff)").fetchall()]
-            if "vacation" not in to_cols:
-                conn.exec_driver_sql("ALTER TABLE timeoff ADD COLUMN vacation INTEGER DEFAULT 0")
-            if "preferred_shifts_per_week" not in cols:
-                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN preferred_shifts_per_week INTEGER")
-            if "max_shifts_per_week" not in cols:
-                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN max_shifts_per_week INTEGER")
-            if "sort_order" not in cols:
-                conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN sort_order INTEGER")
-            # Create aircrew arrivals table if missing
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE IF NOT EXISTS aircrew_arrivals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    week_id INTEGER NOT NULL,
-                    carrier TEXT NOT NULL,
-                    date DATE NOT NULL,
-                    times TEXT DEFAULT '',
-                    UNIQUE(week_id, carrier, date)
+        # Keep lightweight schema fixes for the existing SQLite databases.
+        if engine.dialect.name == "sqlite":
+            with engine.connect() as conn:
+                cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(employees)").fetchall()]
+                if "availability" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN availability TEXT")
+                if "preferred_shift" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN preferred_shift TEXT")
+                if "seniority" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN seniority INTEGER")
+                to_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(timeoff)").fetchall()]
+                if "vacation" not in to_cols:
+                    conn.exec_driver_sql("ALTER TABLE timeoff ADD COLUMN vacation INTEGER DEFAULT 0")
+                if "preferred_shifts_per_week" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN preferred_shifts_per_week INTEGER")
+                if "max_shifts_per_week" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN max_shifts_per_week INTEGER")
+                if "sort_order" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN sort_order INTEGER")
+                # Create aircrew arrivals table if missing
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS aircrew_arrivals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        week_id INTEGER NOT NULL,
+                        carrier TEXT NOT NULL,
+                        date DATE NOT NULL,
+                        times TEXT DEFAULT '',
+                        UNIQUE(week_id, carrier, date)
+                    )
+                    """
                 )
-                """
-            )
-            # Create employee_roles table if missing
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE IF NOT EXISTS employee_roles (
-                    id INTEGER PRIMARY KEY,
-                    employee_id INTEGER NOT NULL,
-                    section_id INTEGER NOT NULL,
-                    FOREIGN KEY(employee_id) REFERENCES employees(id),
-                    FOREIGN KEY(section_id) REFERENCES sections(id)
+                # Create employee_roles table if missing
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS employee_roles (
+                        id INTEGER PRIMARY KEY,
+                        employee_id INTEGER NOT NULL,
+                        section_id INTEGER NOT NULL,
+                        FOREIGN KEY(employee_id) REFERENCES employees(id),
+                        FOREIGN KEY(section_id) REFERENCES sections(id)
+                    )
+                    """
                 )
-                """
-            )
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE IF NOT EXISTS occupancy_levels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    week_id INTEGER NOT NULL,
-                    date DATE NOT NULL,
-                    percentage REAL,
-                    UNIQUE(week_id, date)
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS occupancy_levels (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        week_id INTEGER NOT NULL,
+                        date DATE NOT NULL,
+                        percentage REAL,
+                        UNIQUE(week_id, date)
+                    )
+                    """
                 )
-                """
-            )
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE IF NOT EXISTS schedule_templates (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    slot INTEGER UNIQUE NOT NULL,
-                    name TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    saved_week_start DATE,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS schedule_templates (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        slot INTEGER UNIQUE NOT NULL,
+                        name TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        saved_week_start DATE,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
                 )
-                """
-            )
-        # Ensure new column exists for assignments.dismissed_timeoff (SQLite light migration)
-        with engine.connect() as conn:
-            a_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(assignments)").fetchall()]
-            if "dismissed_timeoff" not in a_cols:
-                conn.exec_driver_sql("ALTER TABLE assignments ADD COLUMN dismissed_timeoff INTEGER DEFAULT 0")
+                # Ensure new column exists for assignments.dismissed_timeoff (SQLite light migration)
+                a_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(assignments)").fetchall()]
+                if "dismissed_timeoff" not in a_cols:
+                    conn.exec_driver_sql("ALTER TABLE assignments ADD COLUMN dismissed_timeoff INTEGER DEFAULT 0")
 
         # Ensure sections exist (and update FD required to 6)
         names = {
@@ -1234,8 +1329,8 @@ def seed_example_assignments_db(week_id: int, s: Session):
             if emp and has_any_timeoff(emp.name, role_name, d, s):
                 continue
             a = s.scalar(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == eid, Assignment.date == d))
-        if a:
-            a.value = choice(["5AM–12PM", "6AM–12PM", "7AM–12PM", "Set"])  # greens/blues
+            if a:
+                a.value = choice(["5AM–12PM", "6AM–12PM", "7AM–12PM", "Set"])  # greens/blues
         # Front Desk: sample among AM/PM/Audit staggered options
         for eid in fd_emp_ids:
             emp = s.get(Employee, eid)
@@ -1710,6 +1805,31 @@ def _with_template_upload_meta(meta: dict[str, Any]) -> dict[str, Any]:
 init_db_once()
 
 # ---- Routes ----
+
+
+@app.route("/admin/database", methods=["POST"])
+def switch_database():
+    requested_choice = _normalize_database_choice(request.form.get("database"))
+    next_url = _sanitize_redirect_target(request.form.get("next")) or request.referrer or "/"
+    provided_password = (request.form.get("database_password") or "").strip()
+    configured_password = _database_switch_password()
+    if requested_choice != "production":
+        if not configured_password:
+            return _redirect_with_query_params(
+                next_url,
+                db_switch_error="password_not_configured",
+            )
+        if provided_password != configured_password:
+            return _redirect_with_query_params(
+                next_url,
+                db_switch_error="invalid_password",
+            )
+    _set_active_database(requested_choice)
+    return _redirect_with_query_params(
+        next_url,
+        db_switched=requested_choice,
+        db_switch_error=None,
+    )
 
 
 @app.route("/")
