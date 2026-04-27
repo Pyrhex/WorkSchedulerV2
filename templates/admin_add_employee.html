@@ -2,28 +2,28 @@
 
 {% block content %}
   <div class="content-inner">
-    <div class="table-card" style="max-width: 520px;">
+    <div class="table-card page-card page-card-sm">
       <div class="table-title">Add Employee</div>
-      <div style="padding:16px;">
+      <div class="card-body">
         {% if error %}
           <div class="banner success" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">{{ error }}</div>
         {% endif %}
         <form method="post" action="/admin/employees/add">
-          <div style="display:grid; gap:12px;">
-            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">
+          <div class="stack-md">
+            <div class="form-grid-auto">
               <label>
-                <div style="font-weight:600; margin-bottom:6px;">First Name</div>
-                <input name="first_name" required placeholder="First name" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+                <div class="field-label">First Name</div>
+                <input class="field-input" name="first_name" required placeholder="First name" />
               </label>
               <label>
-                <div style="font-weight:600; margin-bottom:6px;">Last Name <span style="font-weight:400;color:#64748b;">(optional)</span></div>
-                <input name="last_name" placeholder="Only needed for duplicates" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+                <div class="field-label">Last Name <span style="font-weight:400;color:#64748b;">(optional)</span></div>
+                <input class="field-input" name="last_name" placeholder="Only needed for duplicates" />
               </label>
             </div>
-            <div style="font-size:12px;color:#475569;">Only add a last name if someone with that first name already serves in the same role.</div>
+            <div class="field-help">Only add a last name if someone with that first name already serves in the same role.</div>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Role</div>
-              <select name="role" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;">
+              <div class="field-label">Role</div>
+              <select class="field-input" name="role" required>
                 <option value="Breakfast Bar">Breakfast Bar</option>
                 <option value="Front Desk">Front Desk</option>
                 <option value="Shuttle">Shuttle</option>
@@ -31,26 +31,26 @@
               </select>
             </label>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Preferred Shift (optional)</div>
-              <input name="preferred_shift" placeholder="e.g., AM (6:00AM–2:00PM)" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <div class="field-label">Preferred Shift (optional)</div>
+              <input class="field-input" name="preferred_shift" placeholder="e.g., AM (6:00AM–2:00PM)" />
             </label>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Seniority (optional)</div>
-              <input type="number" min="0" step="1" name="seniority" placeholder="e.g., 5" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <div class="field-label">Seniority (optional)</div>
+              <input class="field-input" type="number" min="0" step="1" name="seniority" placeholder="e.g., 5" />
             </label>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Preferred Shifts / Week (optional)</div>
-              <input type="number" min="0" step="1" name="preferred_shifts_per_week" placeholder="e.g., 4" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <div class="field-label">Preferred Shifts / Week (optional)</div>
+              <input class="field-input" type="number" min="0" step="1" name="preferred_shifts_per_week" placeholder="e.g., 4" />
             </label>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Max Shifts / Week (optional)</div>
-              <input type="number" min="0" step="1" name="max_shifts_per_week" placeholder="e.g., 5" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <div class="field-label">Max Shifts / Week (optional)</div>
+              <input class="field-input" type="number" min="0" step="1" name="max_shifts_per_week" placeholder="e.g., 5" />
             </label>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Availability (optional)</div>
-              <input name="availability" placeholder="e.g., Mon-Fri 6a-2p; Sat Sun off" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <div class="field-label">Availability (optional)</div>
+              <input class="field-input" name="availability" placeholder="e.g., Mon-Fri 6a-2p; Sat Sun off" />
             </label>
-            <div style="display:flex; gap:8px;">
+            <div class="form-actions">
               <button class="btn primary" type="submit">Add Employee</button>
               <a class="btn ghost" href="/">Cancel</a>
             </div>

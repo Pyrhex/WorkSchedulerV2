@@ -16,23 +16,25 @@
           <span>This Week</span>
           <button class="btn primary" onclick="copyMeals()">Copy</button>
         </div>
-        <div style="padding: 12px 16px;">
-          <table style="width:100%; border-collapse: collapse;">
-            <thead>
-              <tr>
-                <th style="text-align:left; color: var(--muted); padding: 8px 6px; border-bottom: 1px solid var(--grid); width: 160px;">Date</th>
-                <th style="text-align:left; color: var(--muted); padding: 8px 6px; border-bottom: 1px solid var(--grid);">Managers (Night, AM, PM)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for date_str, names in rows %}
-              <tr>
-                <td style="padding: 8px 6px; border-bottom: 1px solid var(--grid); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">{{ date_str }}</td>
-                <td style="padding: 8px 6px; border-bottom: 1px solid var(--grid);">{{ names }}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+        <div class="card-body">
+          <div class="table-scroll">
+            <table style="width:100%; border-collapse: collapse;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; color: var(--muted); padding: 8px 6px; border-bottom: 1px solid var(--grid); width: 160px;">Date</th>
+                  <th style="text-align:left; color: var(--muted); padding: 8px 6px; border-bottom: 1px solid var(--grid);">Managers (Night, AM, PM)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for date_str, names in rows %}
+                <tr>
+                  <td style="padding: 8px 6px; border-bottom: 1px solid var(--grid); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">{{ date_str }}</td>
+                  <td style="padding: 8px 6px; border-bottom: 1px solid var(--grid);">{{ names }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
           <div style="margin-top: 10px; color: var(--muted); font-size: 13px;">{{ rows|length }} day(s) listed.</div>
         </div>
       </div>

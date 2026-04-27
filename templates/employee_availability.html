@@ -56,13 +56,13 @@
 
       <div class="table-card" style="margin-top:16px;">
         <div class="table-title">Other Information</div>
-        <div style="padding: 12px 16px; display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+        <div class="card-body form-grid-2">
           <label>
-            <div style="font-weight:600; margin-bottom:6px;">Seniority</div>
-            <input type="number" min="0" step="1" name="seniority" value="{{ employee.seniority or '' }}" style="width:100%;padding:6px;border:1px solid #e2e8f0;border-radius:6px;" />
+            <div class="field-label">Seniority</div>
+            <input class="field-input compact" type="number" min="0" step="1" name="seniority" value="{{ employee.seniority or '' }}" />
           </label>
           <label>
-            <div style="font-weight:600; margin-bottom:6px;">Preferred Shift</div>
+            <div class="field-label">Preferred Shift</div>
             <select name="preferred_shift" class="shift-select">
               <option value="">-- none --</option>
               {% for v in variants %}
@@ -71,17 +71,17 @@
             </select>
           </label>
           <label>
-            <div style="font-weight:600; margin-bottom:6px;">Preferred Shifts / Week</div>
-            <input type="number" min="0" step="1" name="preferred_shifts_per_week" value="{{ employee.preferred_shifts_per_week or '' }}" style="width:100%;padding:6px;border:1px solid #e2e8f0;border-radius:6px;" />
+            <div class="field-label">Preferred Shifts / Week</div>
+            <input class="field-input compact" type="number" min="0" step="1" name="preferred_shifts_per_week" value="{{ employee.preferred_shifts_per_week or '' }}" />
           </label>
           <label>
-            <div style="font-weight:600; margin-bottom:6px;">Max Shifts / Week</div>
-            <input type="number" min="0" step="1" name="max_shifts_per_week" value="{{ employee.max_shifts_per_week or '' }}" style="width:100%;padding:6px;border:1px solid #e2e8f0;border-radius:6px;" />
+            <div class="field-label">Max Shifts / Week</div>
+            <input class="field-input compact" type="number" min="0" step="1" name="max_shifts_per_week" value="{{ employee.max_shifts_per_week or '' }}" />
           </label>
         </div>
       </div>
 
-      <div style="margin-top:12px; display:flex; gap:8px;">
+      <div class="form-actions" style="margin-top:12px;">
         <button class="btn primary" type="submit">Save</button>
         <a class="btn ghost" href="/admin/employees">Cancel</a>
       </div>

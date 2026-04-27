@@ -2,17 +2,17 @@
 
 {% block content %}
   <div class="content-inner">
-    <div class="table-card" style="max-width: 560px;">
+    <div class="table-card page-card page-card-sm">
       <div class="table-title">New Time Off Request</div>
-      <div style="padding: 16px;">
+      <div class="card-body">
         {% if error %}
           <div class="banner success" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">{{ error }}</div>
         {% endif %}
         <form method="post" action="/timeoff/new">
-          <div style="display:grid; gap:12px;">
+          <div class="stack-md">
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Employee Name</div>
-              <input name="name" list="employee-list" required placeholder="Select or type name" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+              <div class="field-label">Employee Name</div>
+              <input class="field-input" name="name" list="employee-list" required placeholder="Select or type name" />
               <datalist id="employee-list">
                 {% for e in employees %}
                   <option value="{{ e.name }}">{{ e.name }}</option>
@@ -20,21 +20,21 @@
               </datalist>
             </label>
             <label>
-              <div style="font-weight:600; margin-bottom:6px;">Role</div>
-              <select name="role" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;">
+              <div class="field-label">Role</div>
+              <select class="field-input" name="role" required>
                 {% for sec in sections %}
                   <option value="{{ sec.name }}">{{ sec.name }}</option>
                 {% endfor %}
               </select>
             </label>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+            <div class="form-grid-2">
               <label>
-                <div style="font-weight:600; margin-bottom:6px;">From</div>
-                <input type="date" name="from" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+                <div class="field-label">From</div>
+                <input class="field-input" type="date" name="from" required />
               </label>
               <label>
-                <div style="font-weight:600; margin-bottom:6px;">To</div>
-                <input type="date" name="to" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" />
+                <div class="field-label">To</div>
+                <input class="field-input" type="date" name="to" required />
               </label>
             </div>
             <label style="display:flex; align-items:center; gap:8px;">
@@ -43,7 +43,7 @@
             <label style="display:flex; align-items:center; gap:8px;">
               <input type="checkbox" name="vacation" /> Vacation
             </label>
-            <div style="display:flex; gap:8px;">
+            <div class="form-actions">
               <button class="btn primary" type="submit">Create</button>
               <a class="btn ghost" href="/timeoff">Cancel</a>
             </div>
