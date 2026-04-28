@@ -148,9 +148,13 @@
       </div>
 
       {% set occupancy_values = occupancy.get('values') if occupancy else {} %}
+      {% set occupancy_last_uploaded = occupancy.get('last_uploaded_at') if occupancy else None %}
       <div class="table-card occupancy-card">
         <div class="table-title occupancy-title">
-          <span>Occupancy</span>
+          <div class="occupancy-title-copy">
+            <span>Occupancy</span>
+            <span class="occupancy-upload-note">Use the History and Forecast report (delimited) to upload occupancy. Last uploaded: {{ occupancy_last_uploaded or 'not yet recorded' }}.</span>
+          </div>
           <div class="occupancy-actions">
             <button type="button" class="occupancy-upload-btn" id="occupancy-upload-trigger" aria-label="Upload occupancy report">
               <span aria-hidden="true">⭱</span>

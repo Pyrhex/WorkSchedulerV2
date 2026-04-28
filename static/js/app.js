@@ -1,4 +1,5 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
+const CUSTOM_OFF_VALUE = 'OFF';
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
 const SHIFT_TIME_REGEX_GLOBAL = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/ig;
@@ -192,12 +193,19 @@ function shiftStartMinutes(value) {
 function basicSelectClass(value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
+  if (value === CUSTOM_OFF_VALUE) return 'select-yellow-alt';
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
   if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
   if (isSuggestedCrewValue(value)) return 'select-red';
   if (value === '5AM–12PM') return 'select-gold';
   if (value === '6AM–12PM') return 'select-blue';
   if (value === '7AM–12PM') return 'select-purple';
+  if (value === 'AM (6:00AM–2:00PM)') return 'select-green';
+  if (value === 'AM (6:15AM–2:15PM)') return 'select-green-alt';
+  if (value === 'PM (2:00PM–10:00PM)') return 'select-blue';
+  if (value === 'PM (2:15PM–10:15PM)') return 'select-blue-alt';
+  if (value === 'Audit (10:00PM–6:00AM)') return 'select-red';
+  if (value === 'Audit (10:15PM–6:15AM)') return 'select-red-alt';
   if (value.startsWith('Audit')) return 'select-red';
   if (value.startsWith('Crew')) return 'select-red';
   if (value.startsWith('Midday')) return 'select-blue';
@@ -247,7 +255,20 @@ function selectClassForValue(_section, value) {
 }
 
 function updateSelectClass(selectEl, section, value) {
-  selectEl.classList.remove('select-gold', 'select-green', 'select-blue', 'select-red', 'select-gray', 'select-yellow', 'select-purple', 'select-orange');
+  selectEl.classList.remove(
+    'select-gold',
+    'select-green',
+    'select-green-alt',
+    'select-blue',
+    'select-blue-alt',
+    'select-red',
+    'select-red-alt',
+    'select-gray',
+    'select-yellow',
+    'select-yellow-alt',
+    'select-purple',
+    'select-orange',
+  );
   const cls = selectClassForValue(section, value);
   if (cls) selectEl.classList.add(cls);
 }
@@ -367,7 +388,7 @@ function updateConflictsUI() {
     if (!empKey || !dk) return;
     const sel = cell.querySelector('select');
     const val = sel ? sel.value : null;
-    const active = !!val && val !== 'Set' && !TIME_OFF_VALUES.has(val);
+    const active = !!val && val !== 'Set' && val !== CUSTOM_OFF_VALUE && !TIME_OFF_VALUES.has(val);
     const key = empKey + '||' + dk;
     if (!groups[key]) groups[key] = [];
     groups[key].push({ cell: cell, active: active });

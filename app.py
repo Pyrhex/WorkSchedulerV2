@@ -408,6 +408,7 @@ class OccupancySnapshot(Base):
     week_id: Mapped[int] = mapped_column(ForeignKey("weeks.id"))
     date: Mapped[date] = mapped_column(Date)
     percentage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    uploaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class TimeOff(Base):
@@ -517,10 +518,11 @@ def week_start_for_date(target: date) -> date:
 
 TIME_OFF_LABEL = "TIME OFF"
 REQ_VAC_LABEL = "REQ VAC"
+OFF_LABEL = "OFF"
 SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
 SUGGESTED_CREW_REGEX = re.compile(r"^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$", re.IGNORECASE)
 TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
-NEUTRAL_ASSIGNMENT_VALUES = {"Set"} | TIME_OFF_VALUES
+NEUTRAL_ASSIGNMENT_VALUES = {"Set", OFF_LABEL} | TIME_OFF_VALUES
 TEMPLATE_SLOT_COUNT = 3
 OCCUPANCY_DATE_RE = re.compile(r"\b(\d{2})-(\d{2})-(\d{2})\b")
 OCCUPANCY_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
@@ -551,6 +553,7 @@ SENIORITY_ORDER = [
 
 BREAKFAST_SHIFTS = [
     "Set",
+    OFF_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "5AM–12PM",
@@ -561,6 +564,7 @@ BREAKFAST_SHIFTS = [
 # Front Desk: three variants (AM, PM, Audit), each has two staggered times
 FRONT_DESK_SHIFTS = [
     "Set",
+    OFF_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "AM (6:00AM–2:00PM)",
@@ -580,6 +584,7 @@ SHUTTLE_CREW_SHIFTS = [
 # Shuttle: fixed variants plus crew windows
 SHUTTLE_SHIFTS = [
     "Set",
+    OFF_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "AM (3:30AM–11:30AM)",
@@ -593,6 +598,7 @@ CREW_EXCEL_FILL = PatternFill(start_color="FFFFB347", end_color="FFFFB347", fill
 
 MAINTENANCE_SHIFTS = [
     "Set",
+    OFF_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "8AM–4:30PM",
@@ -1126,10 +1132,14 @@ def init_db_once():
                         week_id INTEGER NOT NULL,
                         date DATE NOT NULL,
                         percentage REAL,
+                        uploaded_at DATETIME,
                         UNIQUE(week_id, date)
                     )
                     """
                 )
+                occupancy_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(occupancy_levels)").fetchall()]
+                if "uploaded_at" not in occupancy_cols:
+                    conn.exec_driver_sql("ALTER TABLE occupancy_levels ADD COLUMN uploaded_at DATETIME")
                 conn.exec_driver_sql(
                     """
                     CREATE TABLE IF NOT EXISTS schedule_templates (
@@ -1384,6 +1394,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         dates = [d.isoformat() for d in daterange(wk.start_date, 7)]
+        valid_date_keys = set(dates)
         
         # Initialize Front Desk counts (2 per variant required)
         shift_variants = ["AM", "PM", "Audit"]
@@ -1422,6 +1433,8 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 continue
 
             date_key = a.date.isoformat()
+            if date_key not in valid_date_keys:
+                continue
 
             # Front Desk variants: count ONLY if the value is a Front Desk label
             if a.value in FRONT_DESK_SHIFTS:
@@ -1602,7 +1615,7 @@ def build_week_context(week_id: int):
                 "employees": [],
                 "employee_ids": {},
                 "assignments": {},
-                "shifts": SECTION_SHIFT_MAP.get(sec.name, ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]),
+                "shifts": SECTION_SHIFT_MAP.get(sec.name, ["Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]),
                 "employee_shifts": {},
             }
             for sec in section_objs
@@ -1661,7 +1674,10 @@ def build_week_context(week_id: int):
             for emp in primary_emps:
                 rows = s.scalars(select(Assignment).where(Assignment.week_id == week_id, Assignment.employee_id == emp.id))
                 for a in rows:
-                    sections[sec_name]["assignments"][emp.name][a.date.isoformat()] = a.value
+                    date_key = a.date.isoformat()
+                    if date_key not in week_keys:
+                        continue
+                    sections[sec_name]["assignments"][emp.name][date_key] = a.value
 
         double_booked = double_booked_snapshot(wk.id)
 
@@ -1705,6 +1721,12 @@ def build_week_context(week_id: int):
             key = row.date.isoformat()
             if key in occupancy_values:
                 occupancy_values[key] = row.percentage
+        last_uploaded_occupancy_at = s.scalar(select(func.max(OccupancySnapshot.uploaded_at)))
+        last_uploaded_occupancy_label = (
+            last_uploaded_occupancy_at.strftime("%b %d, %Y %I:%M %p")
+            if last_uploaded_occupancy_at
+            else None
+        )
 
         # time off
         to_list = []
@@ -1780,6 +1802,7 @@ def build_week_context(week_id: int):
             "shuttle_suggestions": shuttle_suggestions,
             "occupancy": {
                 "values": occupancy_values,
+                "last_uploaded_at": last_uploaded_occupancy_label,
             },
             "schedule_templates": template_slots,
         }
@@ -2009,6 +2032,8 @@ def _basic_shift_css_class(label: Optional[str]) -> str:
         return ""
     if label == "Set":
         return "select-gray"
+    if label == OFF_LABEL:
+        return "select-yellow-alt"
     if label in TIME_OFF_VALUES:
         return "select-yellow"
     if label == "5AM–12PM":
@@ -2019,6 +2044,18 @@ def _basic_shift_css_class(label: Optional[str]) -> str:
         return "select-purple"
     if label == SHUTTLE_COMBO_LABEL:
         return "select-orange"
+    if label == "AM (6:00AM–2:00PM)":
+        return "select-green"
+    if label == "AM (6:15AM–2:15PM)":
+        return "select-green-alt"
+    if label == "PM (2:00PM–10:00PM)":
+        return "select-blue"
+    if label == "PM (2:15PM–10:15PM)":
+        return "select-blue-alt"
+    if label == "Audit (10:00PM–6:00AM)":
+        return "select-red"
+    if label == "Audit (10:15PM–6:15AM)":
+        return "select-red-alt"
     if label.startswith("Audit"):
         return "select-red"
     if label.startswith("Crew"):
@@ -2069,6 +2106,11 @@ def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
     value = (label or "").strip()
     if not value:
         return None
+    # Only infer shuttle coverage from shuttle-style labels or custom time ranges.
+    # Known labels from other departments can overlap the shuttle windows by time,
+    # but they should never satisfy shuttle staffing.
+    if value in BREAKFAST_SHIFTS or value in FRONT_DESK_SHIFTS or value in MAINTENANCE_SHIFTS:
+        return None
     if value == "AM (3:30AM–11:30AM)":
         return "AM"
     if value.startswith("Midday"):
@@ -2101,7 +2143,7 @@ def shift_class_filter(label: str) -> str:
 def combined_shift_options(section_names: Iterable[str]) -> List[str]:
     ordered_sections = list(section_names)
     if not ordered_sections:
-        return ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]
+        return ["Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]
 
     seen: set[str] = set()
     options: list[str] = []
@@ -2112,17 +2154,17 @@ def combined_shift_options(section_names: Iterable[str]) -> List[str]:
             seen.add(label)
 
     # Ensure neutral options appear first if any referenced section includes them
-    for neutral in ("Set", TIME_OFF_LABEL, REQ_VAC_LABEL):
+    for neutral in ("Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL):
         if any(neutral in SECTION_SHIFT_MAP.get(sec, []) for sec in ordered_sections):
             _add(neutral)
 
     for sec in ordered_sections:
         for label in SECTION_SHIFT_MAP.get(sec, []):
-            if label in ("Set", TIME_OFF_LABEL, REQ_VAC_LABEL):
+            if label in ("Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL):
                 continue
             _add(label)
 
-    return options or ["Set", TIME_OFF_LABEL, REQ_VAC_LABEL]
+    return options or ["Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]
 
 
 @app.template_filter("format_shift")
@@ -2993,17 +3035,21 @@ def assign():
             dte = date(y, m, d)
         except Exception:
             return jsonify({"ok": False, "error": "Bad date"}), 400
+        week_end = week.start_date + timedelta(days=6)
+        if dte < week.start_date or dte > week_end:
+            return jsonify({"ok": False, "error": "Date outside of selected week"}), 400
 
         a = s.scalar(select(Assignment).where(Assignment.week_id == week.id, Assignment.employee_id == emp.id, Assignment.date == dte))
         if not a:
             a = Assignment(week_id=week.id, employee_id=emp.id, date=dte, value="Set")
             s.add(a)
         # If there is approved time off on this date, allow manual override:
-        # - When user selects a non-time-off value, record it and mark dismissed_timeoff=1
+        # - When user selects a working shift, record it and mark dismissed_timeoff=1
         #   to indicate a scheduled override despite approved time off.
-        # - When user selects a time-off value (TIME OFF or REQ VAC), set it and clear the flag.
+        # - When user selects a non-working value (TIME OFF, REQ VAC, or OFF),
+        #   keep it as non-working and clear the override flag.
         if has_approved_timeoff(emp.name, sec.name, dte, s):
-            if value and value not in TIME_OFF_VALUES:
+            if value and value not in TIME_OFF_VALUES and value != OFF_LABEL:
                 # Allow override with explicit shift
                 a.value = value
                 try:
@@ -3012,8 +3058,8 @@ def assign():
                 except Exception:
                     pass
             else:
-                # Explicit time-off selection
-                a.value = value if value in TIME_OFF_VALUES else TIME_OFF_LABEL
+                # Explicit non-working selection
+                a.value = value if value in TIME_OFF_VALUES or value == OFF_LABEL else TIME_OFF_LABEL
                 try:
                     a.dismissed_timeoff = False  # type: ignore[attr-defined]
                 except Exception:
@@ -3489,6 +3535,7 @@ def import_occupancy_report():
     touched_dates: set[str] = set()
     per_week_batches: dict[int, list[dict[str, Any]]] = defaultdict(list)
     week_cells: dict[str, Optional[float]] = {}
+    upload_timestamp = datetime.utcnow()
 
     with SessionLocal() as s:
         display_week = s.get(Week, display_week_id_int) if display_week_id_int else None
@@ -3502,11 +3549,18 @@ def import_occupancy_report():
                 )
             )
             if row and row.percentage is not None and math.isclose(row.percentage, pct_value, rel_tol=1e-09, abs_tol=1e-06):
+                row.uploaded_at = upload_timestamp
                 continue
             if row:
                 row.percentage = pct_value
+                row.uploaded_at = upload_timestamp
             else:
-                row = OccupancySnapshot(week_id=week.id, date=dte, percentage=pct_value)
+                row = OccupancySnapshot(
+                    week_id=week.id,
+                    date=dte,
+                    percentage=pct_value,
+                    uploaded_at=upload_timestamp,
+                )
                 s.add(row)
             updated += 1
             iso_key = dte.isoformat()

@@ -484,6 +484,16 @@ button {
   position: relative;
   padding-right: 140px;
 }
+.occupancy-title-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.occupancy-upload-note {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
 .table-hint { padding: 8px 16px 0; font-size: 12px; color: var(--muted); }
 
 .employee-row { cursor: grab; transition: background 0.15s ease, box-shadow 0.15s ease; }
@@ -521,10 +531,14 @@ button {
 
 /* Color the select itself based on shift type */
 .shift-select.select-green { background: #15803d; border-color: #166534; color: #ffffff; }
+.shift-select.select-green-alt { background: #22c55e; border-color: #16a34a; color: #ffffff; }
 .shift-select.select-blue  { background: #1d4ed8; border-color: #1e40af; color: #ffffff; }
+.shift-select.select-blue-alt  { background: #60a5fa; border-color: #2563eb; color: #ffffff; }
 .shift-select.select-red   { background: #b91c1c; border-color: #991b1b; color: #ffffff; }
+.shift-select.select-red-alt   { background: #ef4444; border-color: #dc2626; color: #ffffff; }
 .shift-select.select-gray  { background: var(--shift-select-gray-bg); border-color: var(--grid); color: var(--text); }
 .shift-select.select-yellow{ background: #b45309; border-color: #92400e; color: #ffffff; }
+.shift-select.select-yellow-alt{ background: #d97706; border-color: #b45309; color: #ffffff; }
 .shift-select.select-gold  { background: #0ea5e9; border-color: transparent; color: #ffffff; }
 .shift-select.select-purple{ background: #7c3aed; border-color: #6d28d9; color: #ffffff; }
 .shift-select.select-orange{ background: #f97316; border-color: #ea580c; color: #ffffff; }
@@ -1017,10 +1031,14 @@ body.aircrew-time-open {
 
 /* Keep white text when disabled and slightly reduce intensity */
 .shift-select:disabled.select-green,
+.shift-select:disabled.select-green-alt,
 .shift-select:disabled.select-blue,
+.shift-select:disabled.select-blue-alt,
 .shift-select:disabled.select-red,
+.shift-select:disabled.select-red-alt,
 .shift-select:disabled.select-gray,
 .shift-select:disabled.select-yellow,
+.shift-select:disabled.select-yellow-alt,
 .shift-select:disabled.select-gold,
 .shift-select:disabled.select-purple,
 .shift-select:disabled.select-orange { color: #ffffff; opacity: 0.9; }
@@ -1187,6 +1205,9 @@ body.aircrew-time-open {
   }
   .table-title.occupancy-title {
     padding-right: 16px;
+  }
+  .occupancy-title-copy {
+    gap: 4px;
   }
   .occupancy-actions {
     position: static;
