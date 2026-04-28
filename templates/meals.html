@@ -41,21 +41,24 @@
     </section>
     {% endif %}
   </div>
+
+  <script>
+    const MEAL_TEXT = {{ copy_text|tojson }};
+    async function copyMeals() {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(MEAL_TEXT);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = MEAL_TEXT;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+      } catch (_) {}
+    }
+  </script>
 {% endblock %}
-
-{% block sidebar %}{% endblock %}
-
-<script>
-  const MEAL_TEXT = `{% for date_str, names in rows %}{{ date_str }}: {{ names }}{% if not loop.last %}\n{% endif %}{% endfor %}`;
-  async function copyMeals() {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(MEAL_TEXT);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = MEAL_TEXT; ta.style.position='fixed'; ta.style.opacity='0';
-        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-      }
-    } catch (_) {}
-  }
-</script>

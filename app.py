@@ -25,8 +25,10 @@ import requests
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 
 load_dotenv()
@@ -2294,9 +2296,11 @@ def manager_meals(week_id: int):
         if not wk:
             return redirect(url_for("view_week", week_id=week_id))
         rows = _manager_meal_rows(s, wk.start_date)
+        copy_text = _manager_meal_copy_text(rows, wk.start_date)
         return render_template(
             "meals.html",
             rows=rows,
+            copy_text=copy_text,
             error=None,
         )
 
@@ -2363,7 +2367,7 @@ def _manager_meal_rows(s: Session, anchor_date: date) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     for d in target_dates:
         if d.weekday() in (6, 0, 1, 2, 3):
-            am_name = "JoJo"
+            am_name = "Jojo"
         else:
             am_entries = by_day.get(d, {}).get("AM", [])
             am_name = pick(am_entries)
@@ -2375,15 +2379,28 @@ def _manager_meal_rows(s: Session, anchor_date: date) -> list[tuple[str, str]]:
     return rows
 
 
+def _manager_meal_copy_text(rows: list[tuple[str, str]], anchor_date: date) -> str:
+    lines = [
+        "Hello AJ,",
+        "",
+        "Please see the MOD list below for the Express Location.",
+        "",
+    ]
+    target_dates = _manager_meal_date_range(anchor_date)
+    for idx, (_, names) in enumerate(rows):
+        day = target_dates[idx]
+        lines.append(f"- {day.strftime('%B')} {day.day} // {names}")
+    return "\n".join(lines)
+
+
 @app.route("/week/<int:week_id>/manager-meals.txt")
 def manager_meals_text(week_id: int):
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         if not wk:
             return redirect(url_for("view_week", week_id=week_id))
-        lines = [f"{date_str}: {names}" for date_str, names in _manager_meal_rows(s, wk.start_date)]
-
-        text = "\n".join(lines)
+        rows = _manager_meal_rows(s, wk.start_date)
+        text = _manager_meal_copy_text(rows, wk.start_date)
         return Response(text, mimetype="text/plain")
 
 
@@ -4998,12 +5015,6 @@ def export_schedule_excel(week_id: int):
             col_letter = get_column_letter(5 + i)  # Start from column E (5)
             ws[f'{col_letter}4'] = day
         
-        # Define employee row mappings based on template structure
-        # Front Desk: rows 5-22 (names in column D)
-        # Shuttle: rows 24-35 (names in column D)
-        # Breakfast Bar: rows 37-42 (names in column D)
-        # Maintenance: starts at the row whose column A label is "Maintenance"
-        
         # Create mapping of employee (name, section) pairs to their row numbers
         employee_rows: dict[tuple[str, str], dict[str, Any]] = {}
         section_blocks: dict[str, dict[str, Any]] = {}
@@ -5047,6 +5058,7 @@ def export_schedule_excel(week_id: int):
             "shuttle drivers": "Shuttle",
             "breakfast bar": "Breakfast Bar",
             "maintenance": "Maintenance",
+            "manager": "Manager",
         }
         tracked_sections = set(section_aliases.values())
         current_section: Optional[str] = None
@@ -5055,58 +5067,268 @@ def export_schedule_excel(week_id: int):
             return section_blocks.setdefault(
                 name,
                 {
+                    "start_row": None,
                     "blank_rows": [],
                     "end_row": None,
+                    "helper_rows": [],
+                    "last_employee_row": None,
+                    "merge_ref": None,
+                    "label_value": None,
+                    "label_style": None,
+                    "label_row_height": None,
+                    "label_row_heights": None,
                     "template_row": None,
                 },
             )
 
+        def _section_name_from_label(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            return section_aliases.get(value.strip().lower())
+
+        def _apply_section_label_borders(start_row: int, end_row: int) -> None:
+            thin_side = Side(style="thin")
+            full_border = Border(
+                left=thin_side,
+                right=thin_side,
+                top=thin_side,
+                bottom=thin_side,
+            )
+            for row_idx in range(start_row, end_row + 1):
+                for col_idx in range(1, 4):
+                    ws.cell(row_idx, col_idx).border = copy_style(full_border)
+
+        def _refresh_section_merge(section_name: str) -> None:
+            block = section_blocks.get(section_name)
+            if not block:
+                return
+            start_row = block.get("start_row")
+            end_row = block.get("end_row")
+            if not start_row or not end_row or end_row < start_row:
+                return
+            new_ref = f"A{start_row}:C{end_row}"
+            old_ref = block.get("merge_ref")
+            if old_ref and old_ref != new_ref:
+                try:
+                    ws.unmerge_cells(old_ref)
+                except Exception:
+                    pass
+            existing_refs = {str(rng) for rng in ws.merged_cells.ranges}
+            if new_ref not in existing_refs:
+                try:
+                    ws.merge_cells(new_ref)
+                except Exception:
+                    pass
+            label_value = block.get("label_value")
+            if label_value is not None:
+                label_cell = ws.cell(start_row, 1)
+                label_cell.value = label_value
+                label_style = block.get("label_style") or {}
+                try:
+                    if label_style.get("font") is not None:
+                        label_cell.font = copy_style(label_style["font"])
+                    if label_style.get("border") is not None:
+                        label_cell.border = copy_style(label_style["border"])
+                    if label_style.get("fill") is not None:
+                        label_cell.fill = copy_style(label_style["fill"])
+                    if label_style.get("alignment") is not None:
+                        label_cell.alignment = copy_style(label_style["alignment"])
+                    if label_style.get("protection") is not None:
+                        label_cell.protection = copy_style(label_style["protection"])
+                    if label_style.get("number_format") is not None:
+                        label_cell.number_format = label_style["number_format"]
+                except Exception:
+                    pass
+            if block.get("label_row_height") is not None:
+                ws.row_dimensions[start_row].height = block["label_row_height"]
+            label_row_heights = block.get("label_row_heights") or []
+            for offset, row_height in enumerate(label_row_heights):
+                target_row = start_row + offset
+                if target_row > end_row:
+                    break
+                ws.row_dimensions[target_row].height = row_height
+            _apply_section_label_borders(start_row, end_row)
+            block["merge_ref"] = new_ref
+
+        def _shift_merged_ranges_for_insert(insert_at: int) -> None:
+            merged_refs = [str(rng) for rng in ws.merged_cells.ranges]
+            if not merged_refs:
+                return
+
+            updated_refs: list[tuple[str, str, Any]] = []
+            for old_ref in merged_refs:
+                min_col, min_row, max_col, max_row = range_boundaries(old_ref)
+                top_left_value = ws.cell(min_row, min_col).value
+                if max_row < insert_at:
+                    new_ref = old_ref
+                elif min_row >= insert_at:
+                    new_ref = (
+                        f"{get_column_letter(min_col)}{min_row + 1}:"
+                        f"{get_column_letter(max_col)}{max_row + 1}"
+                    )
+                else:
+                    new_ref = (
+                        f"{get_column_letter(min_col)}{min_row}:"
+                        f"{get_column_letter(max_col)}{max_row + 1}"
+                    )
+                updated_refs.append((old_ref, new_ref, top_left_value))
+
+            for old_ref in merged_refs:
+                try:
+                    ws.unmerge_cells(old_ref)
+                except Exception:
+                    pass
+
+            seen_refs: set[str] = set()
+            for _, new_ref, top_left_value in updated_refs:
+                if new_ref in seen_refs:
+                    continue
+                try:
+                    ws.merge_cells(new_ref)
+                    min_col, min_row, _, _ = range_boundaries(new_ref)
+                    if top_left_value is not None:
+                        ws.cell(min_row, min_col).value = top_left_value
+                    seen_refs.add(new_ref)
+                except Exception:
+                    continue
+
+            for block in section_blocks.values():
+                old_ref = block.get("merge_ref")
+                for previous_ref, new_ref, _ in updated_refs:
+                    if old_ref == previous_ref:
+                        block["merge_ref"] = new_ref
+                        label_value = block.get("label_value")
+                        if label_value is not None:
+                            min_col, min_row, _, _ = range_boundaries(new_ref)
+                            label_cell = ws.cell(min_row, min_col)
+                            label_cell.value = label_value
+                            label_style = block.get("label_style") or {}
+                            try:
+                                if label_style.get("font") is not None:
+                                    label_cell.font = copy_style(label_style["font"])
+                                if label_style.get("border") is not None:
+                                    label_cell.border = copy_style(label_style["border"])
+                                if label_style.get("fill") is not None:
+                                    label_cell.fill = copy_style(label_style["fill"])
+                                if label_style.get("alignment") is not None:
+                                    label_cell.alignment = copy_style(label_style["alignment"])
+                                if label_style.get("protection") is not None:
+                                    label_cell.protection = copy_style(label_style["protection"])
+                                if label_style.get("number_format") is not None:
+                                    label_cell.number_format = label_style["number_format"]
+                            except Exception:
+                                pass
+                            if block.get("label_row_height") is not None:
+                                ws.row_dimensions[min_row].height = block["label_row_height"]
+                            label_row_heights = block.get("label_row_heights") or []
+                            max_row = range_boundaries(new_ref)[3]
+                            for offset, row_height in enumerate(label_row_heights):
+                                target_row = min_row + offset
+                                if target_row > max_row:
+                                    break
+                                ws.row_dimensions[target_row].height = row_height
+                            _apply_section_label_borders(min_row, max_row)
+                        break
+
+        for merged_range in sorted(ws.merged_cells.ranges, key=lambda rng: rng.min_row):
+            if merged_range.min_col != 1 or merged_range.max_col != 3:
+                continue
+            section_name = _section_name_from_label(ws.cell(merged_range.min_row, merged_range.min_col).value)
+            if section_name not in tracked_sections:
+                continue
+            block = _section_block(section_name)
+            block["start_row"] = merged_range.min_row
+            block["end_row"] = merged_range.max_row
+            block["merge_ref"] = str(merged_range)
+            label_cell = ws.cell(merged_range.min_row, merged_range.min_col)
+            block["label_value"] = label_cell.value
+            block["label_style"] = {
+                "font": copy_style(label_cell.font),
+                "border": copy_style(label_cell.border),
+                "fill": copy_style(label_cell.fill),
+                "alignment": copy_style(label_cell.alignment),
+                "protection": copy_style(label_cell.protection),
+                "number_format": label_cell.number_format,
+            }
+            block["label_row_height"] = ws.row_dimensions[merged_range.min_row].height
+            block["label_row_heights"] = [
+                ws.row_dimensions[row_idx].height
+                for row_idx in range(merged_range.min_row, merged_range.max_row + 1)
+            ]
+
         for row in range(1, ws.max_row + 1):
             label_val = ws[f'A{row}'].value
-            if isinstance(label_val, str):
-                normalized_label = label_val.strip().lower()
-                if normalized_label in section_aliases:
-                    # close out previous section boundaries if necessary
-                    if current_section and current_section != section_aliases[normalized_label]:
-                        block = _section_block(current_section)
-                        if block.get("end_row") is None:
-                            block["end_row"] = row
-                    current_section = section_aliases[normalized_label]
-                elif normalized_label:
-                    if current_section:
-                        block = _section_block(current_section)
-                        if block.get("end_row") is None:
-                            block["end_row"] = row
-                    current_section = None
+            section_name = _section_name_from_label(label_val)
+            if section_name:
+                current_section = section_name
+                block = _section_block(section_name)
+                block["start_row"] = block.get("start_row") or row
+                block["label_value"] = block.get("label_value") or label_val
+                if block.get("label_style") is None:
+                    label_cell = ws.cell(row, 1)
+                    block["label_style"] = {
+                        "font": copy_style(label_cell.font),
+                        "border": copy_style(label_cell.border),
+                        "fill": copy_style(label_cell.fill),
+                        "alignment": copy_style(label_cell.alignment),
+                        "protection": copy_style(label_cell.protection),
+                        "number_format": label_cell.number_format,
+                    }
+                if block.get("label_row_height") is None:
+                    block["label_row_height"] = ws.row_dimensions[row].height
+                if block.get("label_row_heights") is None:
+                    block["label_row_heights"] = [ws.row_dimensions[row].height]
+                if block.get("end_row") is None:
+                    next_label_row = None
+                    for probe in range(row + 1, ws.max_row + 1):
+                        if _section_name_from_label(ws[f'A{probe}'].value):
+                            next_label_row = probe
+                            break
+                    block["end_row"] = next_label_row - 1 if next_label_row else ws.max_row
+            elif isinstance(label_val, str) and label_val.strip():
+                current_section = None
+
             if current_section not in tracked_sections:
                 continue
             block = _section_block(current_section)
+            start_row = block.get("start_row") or row
+            end_row = block.get("end_row") or ws.max_row
+            if row < start_row or row > end_row:
+                continue
             name_cell = ws[f'D{row}']
             primary = _primary_name_from_cell(name_cell.value)
             if primary:
                 employee_rows[(primary, current_section)] = {"row": row, "section": current_section}
                 if block.get("template_row") is None:
                     block["template_row"] = row
+                block["last_employee_row"] = row
             elif _is_blank_slot(name_cell.value):
                 block["blank_rows"].append(row)
-        # Ensure end boundaries for any trailing sections
+            elif isinstance(name_cell.value, str) and name_cell.value.strip().startswith("**"):
+                block["helper_rows"].append(row)
+
         for block in section_blocks.values():
             if block.get("end_row") is None:
-                block["end_row"] = ws.max_row + 1
+                block["end_row"] = ws.max_row
 
         def _clone_row_style(src_row: int, dest_row: int) -> None:
             if src_row < 1 or dest_row < 1 or src_row > ws.max_row:
                 return
-            for col_idx in range(4, min(ws.max_column, 11) + 1):
+            for col_idx in range(1, min(ws.max_column, 11) + 1):
                 src_cell = ws.cell(row=src_row, column=col_idx)
                 dest_cell = ws.cell(row=dest_row, column=col_idx)
+                if isinstance(src_cell, MergedCell) or isinstance(dest_cell, MergedCell):
+                    continue
                 dest_cell.value = None
-                if src_cell.has_style:
-                    dest_cell.font = copy_style(src_cell.font)
-                    dest_cell.border = copy_style(src_cell.border)
-                    dest_cell.fill = copy_style(src_cell.fill)
-                    dest_cell.number_format = src_cell.number_format
-                    dest_cell.alignment = copy_style(src_cell.alignment)
+                try:
+                    if src_cell.has_style:
+                        dest_cell.font = copy_style(src_cell.font)
+                        dest_cell.border = copy_style(src_cell.border)
+                        dest_cell.fill = copy_style(src_cell.fill)
+                        dest_cell.number_format = src_cell.number_format
+                        dest_cell.alignment = copy_style(src_cell.alignment)
+                except Exception:
+                    continue
             src_dim = ws.row_dimensions.get(src_row)
             if src_dim and src_dim.height:
                 ws.row_dimensions[dest_row].height = src_dim.height
@@ -5123,10 +5345,16 @@ def export_schedule_excel(week_id: int):
             if block["blank_rows"]:
                 row_num = block["blank_rows"].pop(0)
             else:
-                insert_at = block.get("end_row") or (ws.max_row + 1)
+                helper_rows = [r for r in block.get("helper_rows", []) if r > (block.get("last_employee_row") or 0)]
+                insert_at = (
+                    min(helper_rows)
+                    if helper_rows
+                    else (block.get("last_employee_row") or block.get("end_row") or ws.max_row) + 1
+                )
                 ws.insert_rows(insert_at)
+                _shift_merged_ranges_for_insert(insert_at)
                 template_row = block.get("template_row")
-                reference_row = template_row or max(insert_at - 1, 1)
+                reference_row = template_row or block.get("last_employee_row") or max(insert_at - 1, 1)
                 if reference_row and reference_row != insert_at:
                     _clone_row_style(reference_row, insert_at)
                 # Shift tracked rows beneath the insertion point
@@ -5137,14 +5365,26 @@ def export_schedule_excel(week_id: int):
                     other_block["blank_rows"] = [
                         r + 1 if r >= insert_at else r for r in other_block["blank_rows"]
                     ]
+                    other_block["helper_rows"] = [
+                        r + 1 if r >= insert_at else r for r in other_block.get("helper_rows", [])
+                    ]
+                    start_row = other_block.get("start_row")
+                    if start_row and start_row >= insert_at:
+                        other_block["start_row"] = start_row + 1
                     end_row = other_block.get("end_row")
                     if end_row and end_row >= insert_at:
                         other_block["end_row"] = end_row + 1
+                    last_employee_row = other_block.get("last_employee_row")
+                    if last_employee_row and last_employee_row >= insert_at:
+                        other_block["last_employee_row"] = last_employee_row + 1
                 row_num = insert_at
-                block["end_row"] = (block.get("end_row") or insert_at) + 1
+                if block.get("end_row") is None or row_num > block["end_row"]:
+                    block["end_row"] = row_num
+                _refresh_section_merge(section_name)
 
             ws[f'D{row_num}'] = display_name.upper()
             block["template_row"] = block.get("template_row") or row_num
+            block["last_employee_row"] = max(block.get("last_employee_row") or 0, row_num)
             employee_rows[(employee_key, section_name)] = {"row": row_num, "section": section_name}
             return row_num
 
@@ -5154,23 +5394,6 @@ def export_schedule_excel(week_id: int):
             cleaned = "".join(ch for ch in value.upper() if ch.isalnum())
             return cleaned or None
 
-        occupancy_row: Optional[int] = None
-        crew_row_map: dict[str, int] = {}
-        carrier_label_map = {carrier: _normalize_label_cell(carrier) for carrier in carriers}
-        for row in range(1, ws.max_row + 1):
-            normalized = _normalize_label_cell(ws[f'D{row}'].value)
-            if not normalized:
-                continue
-            if normalized in {"OCC", "OCCUPANCY"} and occupancy_row is None:
-                occupancy_row = row
-                continue
-            for carrier, carrier_norm in carrier_label_map.items():
-                if not carrier_norm:
-                    continue
-                if normalized == carrier_norm or carrier_norm.startswith(normalized) or normalized.startswith(carrier_norm):
-                    crew_row_map.setdefault(carrier, row)
-                    break
-        
         # Build map of employee -> primary section name (for cross-role tagging)
         emp_primary: dict[str, str] = {}
         for e in s.scalars(select(Employee)):
@@ -5293,6 +5516,23 @@ def export_schedule_excel(week_id: int):
                     cell.value = shift_display
                     if _is_crew_shift_label(shift_value, section_name):
                         cell.fill = CREW_EXCEL_FILL
+
+        occupancy_row: Optional[int] = None
+        crew_row_map: dict[str, int] = {}
+        carrier_label_map = {carrier: _normalize_label_cell(carrier) for carrier in carriers}
+        for row in range(1, ws.max_row + 1):
+            normalized = _normalize_label_cell(ws[f'D{row}'].value)
+            if not normalized:
+                continue
+            if normalized in {"OCC", "OCCUPANCY"} and occupancy_row is None:
+                occupancy_row = row
+                continue
+            for carrier, carrier_norm in carrier_label_map.items():
+                if not carrier_norm:
+                    continue
+                if normalized == carrier_norm or carrier_norm.startswith(normalized) or normalized.startswith(carrier_norm):
+                    crew_row_map.setdefault(carrier, row)
+                    break
 
         if occupancy_row is not None:
             for i, date_info in enumerate(dates):
