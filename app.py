@@ -400,6 +400,13 @@ class AircrewArrival(Base):
     times: Mapped[str] = mapped_column(String, default="")
 
 
+class AircrewCarrier(Base):
+    __tablename__ = "aircrew_carriers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True)
+
+
 class OccupancySnapshot(Base):
     __tablename__ = "occupancy_levels"
     __table_args__ = (
@@ -655,7 +662,25 @@ def _normalize_carrier_label(value: Optional[str]) -> str:
     return AIRCREW_CARRIER_ALIAS_MAP.get(compact, label)
 
 
+def _all_aircrew_carriers(session: Optional[Session] = None) -> list[str]:
+    carriers: set[str] = set(AIRCREW_CARRIERS)
+
+    def collect(active_session: Session) -> None:
+        for name in active_session.scalars(select(AircrewCarrier.name)):
+            normalized = _normalize_carrier_label(name)
+            if normalized:
+                carriers.add(normalized)
+
+    if session is not None:
+        collect(session)
+    else:
+        with SessionLocal() as temp_session:
+            collect(temp_session)
+    return sorted(carriers)
+
+
 def _guess_carrier_name_from_sheet(sheet) -> Optional[str]:
+    known_carriers = set(_all_aircrew_carriers())
     max_rows = min(sheet.max_row, 8)
     for row in sheet.iter_rows(min_row=1, max_row=max_rows, values_only=True):
         for cell in row:
@@ -670,7 +695,7 @@ def _guess_carrier_name_from_sheet(sheet) -> Optional[str]:
                 if normalized:
                     return normalized
             normalized = _normalize_carrier_label(text)
-            if normalized in AIRCREW_CARRIERS:
+            if normalized in known_carriers:
                 return normalized
     return None
 
@@ -1112,6 +1137,14 @@ def init_db_once():
                         date DATE NOT NULL,
                         times TEXT DEFAULT '',
                         UNIQUE(week_id, carrier, date)
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS aircrew_carriers (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT UNIQUE NOT NULL
                     )
                     """
                 )
@@ -1684,7 +1717,7 @@ def build_week_context(week_id: int):
         double_booked = double_booked_snapshot(wk.id)
 
         # Aircrew arrivals: carriers and per-day times arrays
-        carriers_set = set(AIRCREW_CARRIERS)
+        carriers_set = set(_all_aircrew_carriers(s))
         aircrew_rows = list(s.scalars(select(AircrewArrival).where(AircrewArrival.week_id == week_id)))
         for row in aircrew_rows:
             if row.carrier:
@@ -3289,6 +3322,43 @@ def upsert_aircrew_arrival():
     })
 
 
+@app.route("/aircrew/carrier", methods=["POST"])
+def add_aircrew_carrier():
+    data = request.get_json(force=True)
+    carrier = _normalize_carrier_label((data.get("carrier") or "").strip())
+    if not carrier:
+        return jsonify({"ok": False, "error": "Carrier name is required"}), 400
+
+    with SessionLocal() as s:
+        existing = s.scalar(select(AircrewCarrier).where(AircrewCarrier.name == carrier))
+        if not existing:
+            s.add(AircrewCarrier(name=carrier))
+            s.commit()
+
+    return jsonify({"ok": True, "carrier": carrier, "carriers": _all_aircrew_carriers()})
+
+
+@app.route("/aircrew/carrier/remove", methods=["POST"])
+def remove_aircrew_carrier():
+    data = request.get_json(force=True)
+    carrier = _normalize_carrier_label((data.get("carrier") or "").strip())
+    if not carrier:
+        return jsonify({"ok": False, "error": "Carrier name is required"}), 400
+    if carrier in AIRCREW_CARRIERS:
+        return jsonify({"ok": False, "error": "Default carriers cannot be removed"}), 400
+
+    with SessionLocal() as s:
+        carrier_row = s.scalar(select(AircrewCarrier).where(AircrewCarrier.name == carrier))
+        if not carrier_row:
+            return jsonify({"ok": False, "error": "Carrier not found"}), 404
+        for arrival in s.scalars(select(AircrewArrival).where(AircrewArrival.carrier == carrier)):
+            s.delete(arrival)
+        s.delete(carrier_row)
+        s.commit()
+
+    return jsonify({"ok": True, "carrier": carrier, "carriers": _all_aircrew_carriers()})
+
+
 @app.route("/aircrew/import", methods=["POST"])
 def import_aircrew_schedule():
     upload = request.files.get("file")
@@ -3387,7 +3457,8 @@ def aircrew_import_template():
     wb = Workbook()
     ws = wb.active
     ws.title = "Aircrew Import"
-    headers = ["Date"] + list(AIRCREW_CARRIERS)
+    carriers = _all_aircrew_carriers()
+    headers = ["Date"] + carriers
     for idx, header in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=idx, value=header)
         cell.font = Font(bold=True)
@@ -3395,7 +3466,7 @@ def aircrew_import_template():
         ws.column_dimensions[get_column_letter(idx)].width = width
     today = date.today()
     start = today.replace(day=1)
-    carrier_count = len(AIRCREW_CARRIERS)
+    carrier_count = len(carriers)
     sample_rows = [
         ["10:15pm\n11:45pm", "8:30am"],
         ["2:05am", "6:15pm"],

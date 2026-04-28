@@ -916,6 +916,32 @@ async function postAircrewUpdate(action, carrier, dateKey, extra = {}) {
   return data;
 }
 
+async function postAircrewCarrier(carrier) {
+  const res = await fetch('/aircrew/carrier', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ carrier }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || 'Unable to add carrier');
+  }
+  return data;
+}
+
+async function postRemoveAircrewCarrier(carrier) {
+  const res = await fetch('/aircrew/carrier/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ carrier }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || 'Unable to remove carrier');
+  }
+  return data;
+}
+
 function applyAircrewCells(carrier, cells) {
   if (!cells) return;
   const updatedDates = new Set();
@@ -1307,6 +1333,59 @@ function wireAircrewArrivals() {
       }
     });
 
+  });
+}
+
+function wireAircrewCarrierAdd() {
+  const button = document.getElementById('aircrew-add-carrier-btn');
+  if (!button) return;
+  button.addEventListener('click', async () => {
+    const rawName = window.prompt('Enter the new airline crew name:');
+    if (rawName === null) return;
+    const carrier = rawName.trim();
+    if (!carrier) {
+      showToast('Carrier name is required');
+      return;
+    }
+    button.disabled = true;
+    try {
+      const data = await postAircrewCarrier(carrier);
+      showToast(`${data.carrier} added`);
+      window.location.reload();
+    } catch (err) {
+      console.error(err);
+      showToast(err && err.message ? err.message : 'Unable to add carrier');
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function wireAircrewCarrierRemove() {
+  const button = document.getElementById('aircrew-remove-carrier-btn');
+  if (!button) return;
+  button.addEventListener('click', async () => {
+    const rawName = window.prompt('Enter the carrier name to remove:');
+    if (rawName === null) return;
+    const carrier = rawName.trim();
+    if (!carrier) {
+      showToast('Carrier name is required');
+      return;
+    }
+    if (!window.confirm(`Remove ${carrier} and all of its saved arrival times?`)) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const data = await postRemoveAircrewCarrier(carrier);
+      showToast(`${data.carrier} removed`);
+      window.location.reload();
+    } catch (err) {
+      console.error(err);
+      showToast(err && err.message ? err.message : 'Unable to remove carrier');
+    } finally {
+      button.disabled = false;
+    }
   });
 }
 
@@ -2014,6 +2093,8 @@ document.addEventListener('DOMContentLoaded', () => {
   aircrewTimePicker = initAircrewTimePicker();
   window.aircrewTimePicker = aircrewTimePicker;
   wireAircrewArrivals();
+  wireAircrewCarrierAdd();
+  wireAircrewCarrierRemove();
   wireOccupancyInputs();
   wireOccupancyUpload();
   wireScheduleTemplateUpload();

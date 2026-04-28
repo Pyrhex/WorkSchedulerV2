@@ -305,7 +305,13 @@
       {% if aircrew and aircrew.carriers %}
       {% set aircrew_arrivals = aircrew.arrivals if aircrew.arrivals is defined else {} %}
       <div class="table-card">
-        <div class="table-title">Aircrew Arrivals</div>
+        <div class="table-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+          <span>Aircrew Arrivals</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <button type="button" class="btn secondary sm" id="aircrew-add-carrier-btn">Add Carrier</button>
+            <button type="button" class="btn ghost sm" id="aircrew-remove-carrier-btn">Remove Carrier</button>
+          </div>
+        </div>
         <div class="schedule-table aircrew-table" role="table" aria-label="Aircrew Arrivals">
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Carrier</div>
