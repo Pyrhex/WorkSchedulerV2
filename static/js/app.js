@@ -1,6 +1,8 @@
 const TIME_OFF_VALUES = new Set(['TIME OFF', 'REQ VAC']);
 const CUSTOM_OFF_VALUE = 'OFF';
+const CUSTOM_NA_VALUE = 'N/A';
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
+const SHUTTLE_PM_LABEL = 'PM (5:30PM–1:30AM)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
 const SHIFT_TIME_REGEX_GLOBAL = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/ig;
 const CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45;
@@ -17,7 +19,7 @@ const CANONICAL_SHIFT_LABELS = [
   'Audit (10:15PM–6:15AM)',
   'AM (3:30AM–11:30AM)',
   'Midday (10:30AM–6:30PM)',
-  'PM (5:30PM–1:30AM)',
+  SHUTTLE_PM_LABEL,
   'Crew (5:45PM–1:45AM)',
   'Crew (8:00PM–12:00AM)',
   'Crew (9:00PM–1:00AM)',
@@ -190,10 +192,32 @@ function shiftStartMinutes(value) {
   return points.length ? points[0] : null;
 }
 
+function isCustomTimeRangeValue(value) {
+  if (!value || value === 'Set' || value === CUSTOM_OFF_VALUE || value === CUSTOM_NA_VALUE || TIME_OFF_VALUES.has(value)) {
+    return false;
+  }
+  if (value === SHUTTLE_COMBO_LABEL || CANONICAL_SHIFT_LABELS.includes(value)) {
+    return false;
+  }
+  return shiftTimePoints(value).length >= 2;
+}
+
+function isTrainingShiftValue(value) {
+  return typeof value === 'string' && /\(\s*T\s*\)\s*$/i.test(value.trim());
+}
+
+function shuttleDateHasPmAnchor(cell) {
+  if (!cell) return false;
+  const dateKey = cell.getAttribute('data-date');
+  if (!dateKey) return false;
+  const selects = document.querySelectorAll(`.schedule-table[aria-label="Shuttle"] .cell[data-date="${dateKey}"] select.shift-select`);
+  return Array.from(selects).some(sel => sel.value === SHUTTLE_PM_LABEL);
+}
+
 function basicSelectClass(value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
-  if (value === CUSTOM_OFF_VALUE) return 'select-yellow-alt';
+  if (value === CUSTOM_OFF_VALUE || value === CUSTOM_NA_VALUE) return 'select-yellow-alt';
   if (TIME_OFF_VALUES.has(value)) return 'select-yellow';
   if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
   if (isSuggestedCrewValue(value)) return 'select-red';
@@ -214,7 +238,7 @@ function basicSelectClass(value) {
   if (value.startsWith('AM')) return 'select-green';
   if (value === '8AM–4:30PM') return 'select-green';
   const startMinutes = shiftStartMinutes(value);
-  if (startMinutes !== null && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) return 'select-red';
+  if (!isTrainingShiftValue(value) && startMinutes !== null && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) return 'select-red';
   return '';
 }
 
@@ -230,7 +254,7 @@ function buildShiftClassWindows() {
 
 const SHIFT_CLASS_WINDOWS = buildShiftClassWindows();
 
-function matchShiftClassByOverlap(value) {
+function matchShiftClassByOverlap(value, { allowCrewMatch = true } = {}) {
   const window = shiftWindowMinutes(value);
   if (!window) return '';
   const [start, end] = window;
@@ -238,6 +262,7 @@ function matchShiftClassByOverlap(value) {
   let bestOverlap = 0;
   let bestStart = Number.POSITIVE_INFINITY;
   SHIFT_CLASS_WINDOWS.forEach(ref => {
+    if (!allowCrewMatch && (ref.className === 'select-red' || ref.className === 'select-red-alt')) return;
     const overlap = windowOverlapMinutes(start, end, ref.start, ref.end);
     if (overlap >= 300 && (overlap > bestOverlap || (overlap === bestOverlap && ref.start < bestStart))) {
       bestOverlap = overlap;
@@ -251,7 +276,7 @@ function matchShiftClassByOverlap(value) {
 function selectClassForValue(_section, value) {
   const cls = basicSelectClass(value);
   if (cls) return cls;
-  return matchShiftClassByOverlap(value);
+  return matchShiftClassByOverlap(value, { allowCrewMatch: !isTrainingShiftValue(value) });
 }
 
 function updateSelectClass(selectEl, section, value) {
@@ -269,8 +294,18 @@ function updateSelectClass(selectEl, section, value) {
     'select-purple',
     'select-orange',
   );
-  const cls = selectClassForValue(section, value);
+  const cell = selectEl.closest('.cell');
+  const cls = section === 'Shuttle' && isCustomTimeRangeValue(value) && !isTrainingShiftValue(value) && shuttleDateHasPmAnchor(cell)
+    ? 'select-red'
+    : selectClassForValue(section, value);
   if (cls) selectEl.classList.add(cls);
+}
+
+function updateShuttleDateSelectClasses(dateKey) {
+  if (!dateKey) return;
+  document
+    .querySelectorAll(`.schedule-table[aria-label="Shuttle"] .cell[data-date="${dateKey}"] select.shift-select`)
+    .forEach(sel => updateSelectClass(sel, 'Shuttle', sel.value));
 }
 
 function initSelectColors() {
@@ -388,7 +423,7 @@ function updateConflictsUI() {
     if (!empKey || !dk) return;
     const sel = cell.querySelector('select');
     const val = sel ? sel.value : null;
-    const active = !!val && val !== 'Set' && val !== CUSTOM_OFF_VALUE && !TIME_OFF_VALUES.has(val);
+    const active = !!val && val !== 'Set' && val !== CUSTOM_OFF_VALUE && val !== CUSTOM_NA_VALUE && !TIME_OFF_VALUES.has(val);
     const key = empKey + '||' + dk;
     if (!groups[key]) groups[key] = [];
     groups[key].push({ cell: cell, active: active });
@@ -593,6 +628,7 @@ function wireShiftSelects() {
             const desired = TIME_OFF_VALUES.has(data.value) ? data.value : 'TIME OFF';
             sel.value = desired;
             updateSelectClass(sel, section, sel.value);
+            if (section === 'Shuttle') updateShuttleDateSelectClasses(dateKey);
             updateCoverageUI(data);
             updateConflictsUI();
             showToast('Blocked: approved time off');
@@ -601,6 +637,7 @@ function wireShiftSelects() {
           throw new Error(data.error || 'Save failed');
         }
         updateSelectClass(sel, section, value);
+        if (section === 'Shuttle') updateShuttleDateSelectClasses(dateKey);
         updateCoverageUI(data);
         updateConflictsUI();
         showToast('Saved');
@@ -618,6 +655,7 @@ function wireShiftSelects() {
         showToast(message);
         sel.value = previousValue;
         updateSelectClass(sel, section, sel.value);
+        if (section === 'Shuttle') updateShuttleDateSelectClasses(dateKey);
         applySuggestionOptionState(sel, 'selected');
       }
     });

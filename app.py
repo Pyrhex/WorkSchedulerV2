@@ -481,10 +481,12 @@ def week_start_for_date(target: date) -> date:
 TIME_OFF_LABEL = "TIME OFF"
 REQ_VAC_LABEL = "REQ VAC"
 OFF_LABEL = "OFF"
+NA_LABEL = "N/A"
 SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
+SHUTTLE_PM_LABEL = "PM (5:30PM–1:30AM)"
 SUGGESTED_CREW_REGEX = re.compile(r"^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$", re.IGNORECASE)
 TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
-NEUTRAL_ASSIGNMENT_VALUES = {"Set", OFF_LABEL} | TIME_OFF_VALUES
+NEUTRAL_ASSIGNMENT_VALUES = {"Set", OFF_LABEL, NA_LABEL} | TIME_OFF_VALUES
 TEMPLATE_SLOT_COUNT = 3
 OCCUPANCY_DATE_RE = re.compile(r"\b(\d{2})-(\d{2})-(\d{2})\b")
 OCCUPANCY_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
@@ -516,6 +518,7 @@ SENIORITY_ORDER = [
 BREAKFAST_SHIFTS = [
     "Set",
     OFF_LABEL,
+    NA_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "5AM–12PM",
@@ -527,6 +530,7 @@ BREAKFAST_SHIFTS = [
 FRONT_DESK_SHIFTS = [
     "Set",
     OFF_LABEL,
+    NA_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "AM (6:00AM–2:00PM)",
@@ -547,12 +551,13 @@ SHUTTLE_CREW_SHIFTS = [
 SHUTTLE_SHIFTS = [
     "Set",
     OFF_LABEL,
+    NA_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "AM (3:30AM–11:30AM)",
     "Midday (10:30AM–6:30PM)",
     SHUTTLE_COMBO_LABEL,
-    "PM (5:30PM–1:30AM)",
+    SHUTTLE_PM_LABEL,
 ] + SHUTTLE_CREW_SHIFTS
 
 DEFAULT_CREW_SHIFT = SHUTTLE_CREW_SHIFTS[0]
@@ -561,6 +566,7 @@ CREW_EXCEL_FILL = PatternFill(start_color="FFFFB347", end_color="FFFFB347", fill
 MAINTENANCE_SHIFTS = [
     "Set",
     OFF_LABEL,
+    NA_LABEL,
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "8AM–4:30PM",
@@ -1355,7 +1361,7 @@ def seed_example_assignments_db(week_id: int, s: Session):
                 shuttle_choices = [
                     "AM (3:30AM–11:30AM)",
                     "Midday (10:30AM–6:30PM)",
-                    "PM (5:30PM–1:30AM)",
+                    SHUTTLE_PM_LABEL,
                     "Set",
                 ] + SHUTTLE_CREW_SHIFTS
                 a.value = choice(shuttle_choices)
@@ -1414,7 +1420,12 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         # Count Front Desk assignments per shift variant per day
         # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
         # regardless of primary role, to account for secondary-role coverage.
-        rows = s.scalars(select(Assignment).where(Assignment.week_id == week_id))
+        rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
+        shuttle_pm_anchor_dates = {
+            a.date.isoformat()
+            for a in rows
+            if a.value == SHUTTLE_PM_LABEL and a.date.isoformat() in valid_date_keys
+        }
 
         for a in rows:
             if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
@@ -1443,7 +1454,10 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 sh_counts[date_key]["Midday"] += 1
                 sh_counts[date_key]["Crew"] += 1
             else:
-                variant = _infer_shuttle_variant(shuttle_value)
+                variant = _infer_shuttle_variant(
+                    shuttle_value,
+                    custom_time_counts_as_crew=date_key in shuttle_pm_anchor_dates,
+                )
                 if variant:
                     sh_counts[date_key][variant] += 1
                 elif is_suggested_crew_label(shuttle_value):
@@ -1603,7 +1617,7 @@ def build_week_context(week_id: int):
                 "employees": [],
                 "employee_ids": {},
                 "assignments": {},
-                "shifts": SECTION_SHIFT_MAP.get(sec.name, ["Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]),
+                "shifts": SECTION_SHIFT_MAP.get(sec.name, ["Set", OFF_LABEL, NA_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]),
                 "employee_shifts": {},
             }
             for sec in section_objs
@@ -1974,6 +1988,21 @@ def _shift_window_minutes(label: Optional[str]) -> tuple[Optional[int], Optional
     return (start, end)
 
 
+def _is_custom_time_range_label(label: Optional[str]) -> bool:
+    value = (label or "").strip()
+    if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
+        return False
+    known_labels = set(BREAKFAST_SHIFTS) | set(FRONT_DESK_SHIFTS) | set(SHUTTLE_SHIFTS) | set(MAINTENANCE_SHIFTS)
+    if value in known_labels:
+        return False
+    start, end = _shift_window_minutes(value)
+    return start is not None and end is not None
+
+
+def _is_training_shift_label(label: Optional[str]) -> bool:
+    return bool(re.search(r"\(\s*T\s*\)\s*$", (label or "").strip(), re.IGNORECASE))
+
+
 def _window_overlap_minutes(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
     return max(0, min(a_end, b_end) - max(a_start, b_start))
 
@@ -1995,7 +2024,7 @@ def _shift_classification_windows() -> list[tuple[int, int, str]]:
     return windows
 
 
-def _match_shift_window_class(label: Optional[str]) -> str:
+def _match_shift_window_class(label: Optional[str], *, allow_crew_match: bool = True) -> str:
     if not label:
         return ""
     start, end = _shift_window_minutes(label)
@@ -2005,6 +2034,8 @@ def _match_shift_window_class(label: Optional[str]) -> str:
     best_overlap = 0
     best_start = 1_000_000
     for win_start, win_end, css_class in _shift_classification_windows():
+        if not allow_crew_match and css_class in {"select-red", "select-red-alt"}:
+            continue
         overlap = _window_overlap_minutes(start, end, win_start, win_end)
         if overlap >= 300 and (
             overlap > best_overlap or (overlap == best_overlap and win_start < best_start)
@@ -2020,7 +2051,7 @@ def _basic_shift_css_class(label: Optional[str]) -> str:
         return ""
     if label == "Set":
         return "select-gray"
-    if label == OFF_LABEL:
+    if label in {OFF_LABEL, NA_LABEL}:
         return "select-yellow-alt"
     if label in TIME_OFF_VALUES:
         return "select-yellow"
@@ -2059,7 +2090,7 @@ def _basic_shift_css_class(label: Optional[str]) -> str:
     if label == "8AM–4:30PM":
         return "select-green"
     start_minutes = _shift_start_minutes(label)
-    if start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
+    if not _is_training_shift_label(label) and start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
         return "select-red"
     return ""
 
@@ -2068,7 +2099,7 @@ def shift_css_class(label: Optional[str]) -> str:
     cls = _basic_shift_css_class(label)
     if cls:
         return cls
-    return _match_shift_window_class(label)
+    return _match_shift_window_class(label, allow_crew_match=not _is_training_shift_label(label))
 
 
 @lru_cache(maxsize=1)
@@ -2076,7 +2107,7 @@ def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
     variants = {
         "AM": _shift_window_minutes("AM (3:30AM–11:30AM)"),
         "Midday": _shift_window_minutes("Midday (10:30AM–6:30PM)"),
-        "PM": _shift_window_minutes("PM (5:30PM–1:30AM)"),
+        "PM": _shift_window_minutes(SHUTTLE_PM_LABEL),
         "Crew": _shift_window_minutes(DEFAULT_CREW_SHIFT),
     }
     resolved: dict[str, tuple[int, int]] = {}
@@ -2090,7 +2121,7 @@ def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
     return resolved
 
 
-def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
+def _infer_shuttle_variant(label: Optional[str], *, custom_time_counts_as_crew: bool = False) -> Optional[str]:
     value = (label or "").strip()
     if not value:
         return None
@@ -2107,8 +2138,10 @@ def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
         return "PM"
     if value.startswith("Crew"):
         return "Crew"
+    if custom_time_counts_as_crew and _is_custom_time_range_label(value) and not _is_training_shift_label(value):
+        return "Crew"
     start_minutes = _shift_start_minutes(value)
-    if start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
+    if not _is_training_shift_label(value) and start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
         return "Crew"
     start, end = _shift_window_minutes(value)
     if start is None or end is None:
@@ -2116,6 +2149,8 @@ def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
     best_variant = None
     best_overlap = 0
     for variant, (win_start, win_end) in _shuttle_variant_windows().items():
+        if variant == "Crew" and _is_training_shift_label(value):
+            continue
         overlap = _window_overlap_minutes(start, end, win_start, win_end)
         if overlap >= 300 and overlap > best_overlap:
             best_variant = variant
@@ -2131,7 +2166,7 @@ def shift_class_filter(label: str) -> str:
 def combined_shift_options(section_names: Iterable[str]) -> List[str]:
     ordered_sections = list(section_names)
     if not ordered_sections:
-        return ["Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]
+        return ["Set", OFF_LABEL, NA_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]
 
     seen: set[str] = set()
     options: list[str] = []
@@ -2142,17 +2177,17 @@ def combined_shift_options(section_names: Iterable[str]) -> List[str]:
             seen.add(label)
 
     # Ensure neutral options appear first if any referenced section includes them
-    for neutral in ("Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL):
+    for neutral in ("Set", OFF_LABEL, NA_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL):
         if any(neutral in SECTION_SHIFT_MAP.get(sec, []) for sec in ordered_sections):
             _add(neutral)
 
     for sec in ordered_sections:
         for label in SECTION_SHIFT_MAP.get(sec, []):
-            if label in ("Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL):
+            if label in ("Set", OFF_LABEL, NA_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL):
                 continue
             _add(label)
 
-    return options or ["Set", OFF_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]
+    return options or ["Set", OFF_LABEL, NA_LABEL, TIME_OFF_LABEL, REQ_VAC_LABEL]
 
 
 @app.template_filter("format_shift")
@@ -2169,11 +2204,9 @@ def format_shift(label: str) -> str:
     if label.startswith("Crew Shift "):
         label = label[len("Crew Shift "):]
     # Prefer time-only inside parentheses if present
-    if "(" in label and ")" in label:
-        start = label.find("(") + 1
-        end = label.find(")", start)
-        if end > start:
-            label = label[start:end]
+    parenthetical_time = _parenthetical_time_text(label)
+    if parenthetical_time:
+        label = parenthetical_time
     # Normalize dash spacing around en dash
     label = re.sub(r"\s*–\s*", " – ", label)
     # Also handle simple hyphen just in case
@@ -2181,6 +2214,17 @@ def format_shift(label: str) -> str:
     # Lowercase AM/PM tokens (handles attached forms like 6:00AM)
     label = re.sub(r"AM|PM", lambda m: m.group(0).lower(), label)
     return _compact_evening_crew_display(label)
+
+
+def _parenthetical_time_text(label: str) -> Optional[str]:
+    if "(" not in label or ")" not in label:
+        return None
+    start = label.find("(") + 1
+    end = label.find(")", start)
+    if end <= start:
+        return None
+    inner = label[start:end]
+    return inner if len(_shift_time_points(inner)) >= 2 else None
 
 
 def _compact_evening_crew_display(label: str) -> str:
@@ -2726,7 +2770,7 @@ def role_availability_variants(role_name: str) -> list[str]:
         return [
             "AM (3:30AM–11:30AM)",
             "Midday (10:30AM–6:30PM)",
-            "PM (5:30PM–1:30AM)",
+            SHUTTLE_PM_LABEL,
         ] + SHUTTLE_CREW_SHIFTS + [SHUTTLE_COMBO_LABEL]
     if role_name == "Maintenance":
         return ["8AM–4:30PM"]
@@ -3049,10 +3093,10 @@ def assign():
         # If there is approved time off on this date, allow manual override:
         # - When user selects a working shift, record it and mark dismissed_timeoff=1
         #   to indicate a scheduled override despite approved time off.
-        # - When user selects a non-working value (TIME OFF, REQ VAC, or OFF),
+        # - When user selects a non-working value (TIME OFF, REQ VAC, OFF, or N/A),
         #   keep it as non-working and clear the override flag.
         if has_approved_timeoff(emp.name, sec.name, dte, s):
-            if value and value not in TIME_OFF_VALUES and value != OFF_LABEL:
+            if value and value not in TIME_OFF_VALUES and value not in {OFF_LABEL, NA_LABEL}:
                 # Allow override with explicit shift
                 a.value = value
                 try:
@@ -3062,7 +3106,7 @@ def assign():
                     pass
             else:
                 # Explicit non-working selection
-                a.value = value if value in TIME_OFF_VALUES or value == OFF_LABEL else TIME_OFF_LABEL
+                a.value = value if value in TIME_OFF_VALUES or value in {OFF_LABEL, NA_LABEL} else TIME_OFF_LABEL
                 try:
                     a.dismissed_timeoff = False  # type: ignore[attr-defined]
                 except Exception:
@@ -4089,7 +4133,7 @@ def generate_new_schedule_db(week_id: int):
             variants = [
                 "AM (3:30AM–11:30AM)",
                 "Midday (10:30AM–6:30PM)",
-                "PM (5:30PM–1:30AM)",
+                SHUTTLE_PM_LABEL,
                 DEFAULT_CREW_SHIFT,
             ]
             for v in variants:
@@ -4679,7 +4723,7 @@ def generate_4_week_schedule(start_week_id: int):
                 variants = [
                     "AM (3:30AM–11:30AM)",
                     "Midday (10:30AM–6:30PM)",
-                    "PM (5:30PM–1:30AM)",
+                    SHUTTLE_PM_LABEL,
                     DEFAULT_CREW_SHIFT,
                 ]
                 for v in variants:
@@ -5014,6 +5058,12 @@ def export_schedule_excel(week_id: int):
         aircrew_ctx = ctx.get("aircrew") or {}
         carriers = aircrew_ctx.get("carriers") or []
         carrier_arrivals = aircrew_ctx.get("arrivals") or {}
+        shuttle_pm_anchor_dates: set[str] = set()
+        shuttle_section = sections.get("Shuttle") or {}
+        for employee_assignments in (shuttle_section.get("assignments") or {}).values():
+            for date_key, value in employee_assignments.items():
+                if value == SHUTTLE_PM_LABEL:
+                    shuttle_pm_anchor_dates.add(date_key)
         
         # Load the template
         wb = load_workbook(template_path)
@@ -5446,14 +5496,21 @@ def export_schedule_excel(week_id: int):
 
         role_abbrev = {"Front Desk": "FD", "Breakfast Bar": "BB", "Shuttle": "SH", "Maintenance": "MA"}
 
-        def _is_crew_shift_label(value: Optional[str], section_name: Optional[str] = None) -> bool:
+        def _is_crew_shift_label(
+            value: Optional[str],
+            section_name: Optional[str] = None,
+            date_key: Optional[str] = None,
+        ) -> bool:
             if section_name != "Shuttle":
                 return False
             if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
                 return False
             if value == SHUTTLE_COMBO_LABEL:
                 return True
-            return _infer_shuttle_variant(value) == "Crew"
+            return _infer_shuttle_variant(
+                value,
+                custom_time_counts_as_crew=bool(date_key and date_key in shuttle_pm_anchor_dates),
+            ) == "Crew"
 
         # Fill in the shift data
         import re
@@ -5464,11 +5521,9 @@ def export_schedule_excel(week_id: int):
                 return "-"
             original = raw
             # Prefer time-only inside parentheses if present
-            if "(" in raw and ")" in raw:
-                start = raw.find("(") + 1
-                end = raw.find(")", start)
-                if end > start:
-                    raw = raw[start:end]
+            parenthetical_time = _parenthetical_time_text(raw)
+            if parenthetical_time:
+                raw = parenthetical_time
             # Add spaces around en dash and hyphen
             raw = re.sub(r"\s*–\s*", " – ", raw)
             raw = re.sub(r"\s*-\s*", " - ", raw)
@@ -5543,7 +5598,7 @@ def export_schedule_excel(week_id: int):
 
                     # Set the cell value and apply crew fill when needed
                     cell.value = shift_display
-                    if _is_crew_shift_label(shift_value, section_name):
+                    if _is_crew_shift_label(shift_value, section_name, date_key):
                         cell.fill = CREW_EXCEL_FILL
 
         occupancy_row: Optional[int] = None
