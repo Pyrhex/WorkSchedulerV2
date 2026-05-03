@@ -1845,18 +1845,18 @@ function initTemplateControls() {
   });
 }
 
-function initWhatsappPasteModal() {
-  const trigger = document.getElementById('whatsapp-paste-trigger');
-  const modal = document.getElementById('whatsapp-paste-modal');
+function initDiscordPasteModal() {
+  const trigger = document.getElementById('discord-paste-trigger');
+  const modal = document.getElementById('discord-paste-modal');
   if (!trigger || !modal) return;
 
   const dropzone = modal.querySelector('[data-dropzone]');
   const previewImg = modal.querySelector('[data-preview]');
   const captionInput = modal.querySelector('[data-caption]');
   const feedbackEl = modal.querySelector('[data-feedback]');
-  const sendBtn = modal.querySelector('[data-action="send-whatsapp"]');
+  const sendBtn = modal.querySelector('[data-action="send-discord"]');
   const clearBtn = modal.querySelector('[data-action="clear-image"]');
-  const closeButtons = modal.querySelectorAll('[data-action="close-whatsapp"]');
+  const closeButtons = modal.querySelectorAll('[data-action="close-discord"]');
   const MAX_BYTES = 8 * 1024 * 1024;
   let currentFile = null;
   let objectUrl = null;
@@ -2002,7 +2002,7 @@ function initWhatsappPasteModal() {
     }
   }
 
-  async function sendToWhatsapp() {
+  async function sendToDiscord() {
     if (!currentFile || !sendBtn) {
       setFeedback('Paste an image first.', 'error');
       return;
@@ -2020,9 +2020,9 @@ function initWhatsappPasteModal() {
     const originalText = sendBtn.textContent;
     sendBtn.disabled = true;
     sendBtn.textContent = 'Sending…';
-    setFeedback('Sending to WhatsApp…', 'info');
+    setFeedback('Sending to Discord…', 'info');
     try {
-      const response = await fetch('/api/whatsapp/send-image', {
+      const response = await fetch('/api/discord/send-image', {
         method: 'POST',
         body: formData,
       });
@@ -2047,7 +2047,7 @@ function initWhatsappPasteModal() {
       setFeedback(message, 'error');
     } finally {
       sendBtn.disabled = false;
-      sendBtn.textContent = originalText || 'Send to WhatsApp';
+      sendBtn.textContent = originalText || 'Send to Discord';
     }
   }
 
@@ -2069,7 +2069,7 @@ function initWhatsappPasteModal() {
     clearBtn.addEventListener('click', resetPreview);
   }
   if (sendBtn) {
-    sendBtn.addEventListener('click', sendToWhatsapp);
+    sendBtn.addEventListener('click', sendToDiscord);
   }
 }
 
@@ -2099,5 +2099,5 @@ document.addEventListener('DOMContentLoaded', () => {
   wireOccupancyUpload();
   wireScheduleTemplateUpload();
   initTemplateControls();
-  initWhatsappPasteModal();
+  initDiscordPasteModal();
 });

@@ -358,15 +358,15 @@ button {
 .btn.delete-icon:focus { background: #b91c1c; }
 .btn.sm { padding: 6px 10px; font-size: 13px; }
 .btn.purple { background: var(--purple); color: #ffffff; }
-.btn.whatsapp { background: #25d366; color: #ffffff; }
-.btn.whatsapp:hover { background: #1eac54; }
-#whatsapp-paste-trigger {
-  background: #25d366;
+.btn.discord { background: #5865f2; color: #ffffff; }
+.btn.discord:hover { background: #4752c4; }
+#discord-paste-trigger {
+  background: #5865f2;
   color: #ffffff;
   border-color: transparent;
 }
-#whatsapp-paste-trigger:hover {
-  background: #1eac54;
+#discord-paste-trigger:hover {
+  background: #4752c4;
 }
 /* Colored outline variants for subtle emphasis */
 .btn.outline-success { background: transparent; border-color: var(--success); color: var(--success); }
@@ -651,7 +651,7 @@ html.dark-mode .aircrew-chip {
   flex-direction: column;
   gap: 18px;
 }
-.whatsapp-modal {
+.discord-modal {
   position: fixed;
   inset: 0;
   display: flex;
@@ -662,22 +662,22 @@ html.dark-mode .aircrew-chip {
   pointer-events: none;
   transition: opacity 0.25s ease;
 }
-.whatsapp-modal[aria-hidden="false"] {
+.discord-modal[aria-hidden="false"] {
   opacity: 1;
   pointer-events: auto;
 }
-.whatsapp-overlay {
+.discord-overlay {
   position: absolute;
   inset: 0;
   background: rgba(15, 23, 42, 0.45);
 }
-.whatsapp-dialog {
+.discord-dialog {
   position: relative;
   z-index: 1;
   width: min(460px, 92vw);
   margin: 0 16px;
 }
-.whatsapp-card {
+.discord-card {
   background: var(--card);
   border-radius: 18px;
   padding: 20px;
@@ -686,23 +686,23 @@ html.dark-mode .aircrew-chip {
   flex-direction: column;
   gap: 16px;
 }
-.whatsapp-card-header {
+.discord-card-header {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
 }
-.whatsapp-card-title {
+.discord-card-title {
   font-size: 18px;
   font-weight: 600;
   color: var(--text);
 }
-.whatsapp-card-subtitle {
+.discord-card-subtitle {
   font-size: 14px;
   color: var(--muted);
   margin-top: 4px;
 }
-.whatsapp-close {
+.discord-close {
   background: transparent;
   border: none;
   font-size: 24px;
@@ -710,11 +710,11 @@ html.dark-mode .aircrew-chip {
   color: var(--muted);
   cursor: pointer;
 }
-.whatsapp-close:hover,
-.whatsapp-close:focus {
+.discord-close:hover,
+.discord-close:focus {
   color: var(--text);
 }
-.whatsapp-dropzone {
+.discord-dropzone {
   border: 2px dashed var(--grid);
   border-radius: 14px;
   min-height: 220px;
@@ -729,49 +729,49 @@ html.dark-mode .aircrew-chip {
   overflow: hidden;
   outline: none;
 }
-.whatsapp-dropzone:focus {
+.discord-dropzone:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
 }
-.whatsapp-dropzone.dragover {
+.discord-dropzone.dragover {
   border-color: var(--primary);
   color: var(--primary);
   background: rgba(59, 130, 246, 0.08);
 }
-.whatsapp-dropzone.has-image {
+.discord-dropzone.has-image {
   border-style: solid;
 }
-.whatsapp-dropzone.has-image .whatsapp-dropzone-hint {
+.discord-dropzone.has-image .discord-dropzone-hint {
   display: none;
 }
-.whatsapp-dropzone img[data-preview] {
+.discord-dropzone img[data-preview] {
   max-width: 100%;
   max-height: 100%;
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.35);
 }
-.whatsapp-dropzone-hint {
+.discord-dropzone-hint {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 14px;
 }
-.whatsapp-dropzone-hint .hint-title {
+.discord-dropzone-hint .hint-title {
   font-weight: 600;
   color: var(--text);
 }
-.whatsapp-dropzone-hint .hint-subtitle {
+.discord-dropzone-hint .hint-subtitle {
   font-size: 13px;
   color: var(--muted);
 }
-.whatsapp-caption {
+.discord-caption {
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 14px;
   color: var(--muted);
 }
-.whatsapp-caption textarea {
+.discord-caption textarea {
   width: 100%;
   border: 1px solid var(--grid);
   border-radius: 8px;
@@ -783,23 +783,23 @@ html.dark-mode .aircrew-chip {
   background: var(--surface-soft);
   color: var(--text);
 }
-.whatsapp-actions {
+.discord-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
 }
-.whatsapp-feedback {
+.discord-feedback {
   font-size: 14px;
   min-height: 18px;
   color: var(--muted);
 }
-.whatsapp-feedback[data-state="error"] {
+.discord-feedback[data-state="error"] {
   color: var(--danger);
 }
-.whatsapp-feedback[data-state="success"] {
+.discord-feedback[data-state="success"] {
   color: var(--success);
 }
-.whatsapp-feedback[data-state="info"] {
+.discord-feedback[data-state="info"] {
   color: var(--blue);
 }
 .aircrew-time-header {
@@ -1216,12 +1216,12 @@ body.aircrew-time-open {
   }
   .coverage-notes,
   .legend,
-  .whatsapp-actions,
+  .discord-actions,
   .aircrew-time-actions {
     flex-direction: column;
     align-items: stretch;
   }
-  .whatsapp-actions .btn,
+  .discord-actions .btn,
   .aircrew-time-actions .btn {
     width: 100%;
   }
