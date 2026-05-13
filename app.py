@@ -5412,6 +5412,27 @@ def export_schedule_excel(week_id: int):
             if src_dim and src_dim.height:
                 ws.row_dimensions[dest_row].height = src_dim.height
 
+        def _shift_tracked_rows_after_insert(insert_at: int) -> None:
+            for info in employee_rows.values():
+                if info["row"] >= insert_at:
+                    info["row"] += 1
+            for other_block in section_blocks.values():
+                other_block["blank_rows"] = [
+                    r + 1 if r >= insert_at else r for r in other_block["blank_rows"]
+                ]
+                other_block["helper_rows"] = [
+                    r + 1 if r >= insert_at else r for r in other_block.get("helper_rows", [])
+                ]
+                start_row = other_block.get("start_row")
+                if start_row and start_row >= insert_at:
+                    other_block["start_row"] = start_row + 1
+                end_row = other_block.get("end_row")
+                if end_row and end_row >= insert_at:
+                    other_block["end_row"] = end_row + 1
+                last_employee_row = other_block.get("last_employee_row")
+                if last_employee_row and last_employee_row >= insert_at:
+                    other_block["last_employee_row"] = last_employee_row + 1
+
         def _ensure_employee_row(section_name: str, employee_key: str, display_name: str) -> Optional[int]:
             existing = employee_rows.get((employee_key, section_name))
             if existing and existing["section"] == section_name:
@@ -5437,25 +5458,7 @@ def export_schedule_excel(week_id: int):
                 if reference_row and reference_row != insert_at:
                     _clone_row_style(reference_row, insert_at)
                 # Shift tracked rows beneath the insertion point
-                for info in employee_rows.values():
-                    if info["row"] >= insert_at:
-                        info["row"] += 1
-                for other_block in section_blocks.values():
-                    other_block["blank_rows"] = [
-                        r + 1 if r >= insert_at else r for r in other_block["blank_rows"]
-                    ]
-                    other_block["helper_rows"] = [
-                        r + 1 if r >= insert_at else r for r in other_block.get("helper_rows", [])
-                    ]
-                    start_row = other_block.get("start_row")
-                    if start_row and start_row >= insert_at:
-                        other_block["start_row"] = start_row + 1
-                    end_row = other_block.get("end_row")
-                    if end_row and end_row >= insert_at:
-                        other_block["end_row"] = end_row + 1
-                    last_employee_row = other_block.get("last_employee_row")
-                    if last_employee_row and last_employee_row >= insert_at:
-                        other_block["last_employee_row"] = last_employee_row + 1
+                _shift_tracked_rows_after_insert(insert_at)
                 row_num = insert_at
                 if block.get("end_row") is None or row_num > block["end_row"]:
                     block["end_row"] = row_num
@@ -5472,6 +5475,65 @@ def export_schedule_excel(week_id: int):
                 return None
             cleaned = "".join(ch for ch in value.upper() if ch.isalnum())
             return cleaned or None
+
+        def _aircrew_export_label(carrier: str) -> str:
+            display = str(carrier or "").strip().upper()
+            normalized = _normalize_label_cell(carrier) or display
+            return f"**{display or normalized}"
+
+        def _ensure_aircrew_carrier_rows(crew_row_map: dict[str, int]) -> dict[str, int]:
+            if not carriers:
+                return crew_row_map
+
+            missing_carriers = [carrier for carrier in carriers if carrier not in crew_row_map]
+            if not missing_carriers:
+                return crew_row_map
+
+            shuttle_block = section_blocks.get("Shuttle")
+            if not shuttle_block:
+                return crew_row_map
+
+            existing_aircrew_rows = sorted(crew_row_map.values())
+            helper_rows = sorted(shuttle_block.get("helper_rows") or [])
+            template_row = (
+                existing_aircrew_rows[0]
+                if existing_aircrew_rows
+                else (
+                    helper_rows[0]
+                    if helper_rows
+                    else (shuttle_block.get("last_employee_row") or shuttle_block.get("template_row"))
+                )
+            )
+            if not template_row:
+                return crew_row_map
+
+            for carrier in missing_carriers:
+                current_aircrew_rows = sorted(crew_row_map.values())
+                if current_aircrew_rows:
+                    insert_at = max(current_aircrew_rows) + 1
+                else:
+                    insert_at = (shuttle_block.get("last_employee_row") or shuttle_block.get("start_row") or ws.max_row) + 1
+
+                ws.insert_rows(insert_at)
+                _shift_merged_ranges_for_insert(insert_at)
+                _clone_row_style(template_row, insert_at)
+                _shift_tracked_rows_after_insert(insert_at)
+
+                # When inserting immediately after the current Shuttle merge, keep
+                # the new carrier row inside that section instead of orphaning it.
+                shuttle_end = shuttle_block.get("end_row")
+                if not shuttle_end or insert_at > shuttle_end:
+                    shuttle_block["end_row"] = insert_at
+                _refresh_section_merge("Shuttle")
+
+                label_cell = ws.cell(row=insert_at, column=4)
+                label_cell.value = _aircrew_export_label(carrier)
+                crew_row_map[carrier] = insert_at
+
+                if template_row >= insert_at:
+                    template_row += 1
+
+            return crew_row_map
 
         # Build map of employee -> primary section name (for cross-role tagging)
         emp_primary: dict[str, str] = {}
@@ -5617,6 +5679,8 @@ def export_schedule_excel(week_id: int):
                 if normalized == carrier_norm or carrier_norm.startswith(normalized) or normalized.startswith(carrier_norm):
                     crew_row_map.setdefault(carrier, row)
                     break
+
+        crew_row_map = _ensure_aircrew_carrier_rows(crew_row_map)
 
         if occupancy_row is not None:
             for i, date_info in enumerate(dates):
