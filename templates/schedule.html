@@ -223,7 +223,7 @@
                 {% set options = shuttle.employee_shifts.get(emp, shuttle.shifts) %}
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls = val | shift_class %}
+                {% set sel_cls = val | shuttle_shift_class %}
                 {% set suggestion = shuttle_suggestions.get(d.key) %}
                 <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">

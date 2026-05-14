@@ -206,14 +206,6 @@ function isTrainingShiftValue(value) {
   return typeof value === 'string' && /\(\s*T\s*\)\s*$/i.test(value.trim());
 }
 
-function shuttleDateHasPmAnchor(cell) {
-  if (!cell) return false;
-  const dateKey = cell.getAttribute('data-date');
-  if (!dateKey) return false;
-  const selects = document.querySelectorAll(`.schedule-table[aria-label="Shuttle"] .cell[data-date="${dateKey}"] select.shift-select`);
-  return Array.from(selects).some(sel => sel.value === SHUTTLE_PM_LABEL);
-}
-
 function basicSelectClass(value) {
   if (!value) return '';
   if (value === 'Set') return 'select-gray';
@@ -273,7 +265,56 @@ function matchShiftClassByOverlap(value, { allowCrewMatch = true } = {}) {
   return bestClass;
 }
 
-function selectClassForValue(_section, value) {
+function inferShuttleVariant(value) {
+  if (!value) return null;
+  if (value === 'AM (3:30AM–11:30AM)') return 'AM';
+  if (value.startsWith('Midday')) return 'Midday';
+  if (value.startsWith('PM (5:30PM')) return 'PM';
+  if (value.startsWith('Crew')) return 'Crew';
+  const startMinutes = shiftStartMinutes(value);
+  if (!isTrainingShiftValue(value) && startMinutes !== null && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) {
+    return 'Crew';
+  }
+  const window = shiftWindowMinutes(value);
+  if (!window) return null;
+  const [start, end] = window;
+  const variants = [
+    ['AM', shiftWindowMinutes('AM (3:30AM–11:30AM)')],
+    ['Midday', shiftWindowMinutes('Midday (10:30AM–6:30PM)')],
+    ['PM', shiftWindowMinutes(SHUTTLE_PM_LABEL)],
+    ['Crew', shiftWindowMinutes('Crew (5:45PM–1:45AM)')],
+  ];
+  let bestVariant = null;
+  let bestOverlap = 0;
+  variants.forEach(([variant, refWindow]) => {
+    if (!refWindow) return;
+    if (variant === 'Crew' && isTrainingShiftValue(value)) return;
+    const overlap = windowOverlapMinutes(start, end, refWindow[0], refWindow[1]);
+    if (overlap >= 300 && overlap > bestOverlap) {
+      bestVariant = variant;
+      bestOverlap = overlap;
+    }
+  });
+  return bestVariant;
+}
+
+function shuttleClassForValue(value) {
+  if (value === SHUTTLE_COMBO_LABEL) return 'select-orange';
+  if (isCustomTimeRangeValue(value)) {
+    const variant = inferShuttleVariant(value);
+    if (variant === 'AM') return 'select-green';
+    if (variant === 'Midday') return 'select-blue';
+    if (variant === 'PM') return 'select-purple';
+    if (variant === 'Crew') return 'select-red';
+  }
+  return null;
+}
+
+function selectClassForValue(section, value) {
+  if (section === 'Shuttle') {
+    const shuttleClass = shuttleClassForValue(value);
+    if (shuttleClass) return shuttleClass;
+  }
   const cls = basicSelectClass(value);
   if (cls) return cls;
   return matchShiftClassByOverlap(value, { allowCrewMatch: !isTrainingShiftValue(value) });
@@ -294,10 +335,7 @@ function updateSelectClass(selectEl, section, value) {
     'select-purple',
     'select-orange',
   );
-  const cell = selectEl.closest('.cell');
-  const cls = section === 'Shuttle' && isCustomTimeRangeValue(value) && !isTrainingShiftValue(value) && shuttleDateHasPmAnchor(cell)
-    ? 'select-red'
-    : selectClassForValue(section, value);
+  const cls = selectClassForValue(section, value);
   if (cls) selectEl.classList.add(cls);
 }
 

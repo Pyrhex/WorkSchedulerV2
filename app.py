@@ -495,7 +495,10 @@ OCCUPANCY_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 def is_suggested_crew_label(value: Optional[str]) -> bool:
     if not value:
         return False
-    return SUGGESTED_CREW_REGEX.match(value.strip()) is not None
+    normalized = value.strip()
+    if SUGGESTED_CREW_REGEX.match(normalized) is None:
+        return False
+    return _infer_shuttle_variant(normalized) == "Crew"
 
 
 UNDO_DELETE_SECONDS = 20
@@ -1421,12 +1424,6 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
         # regardless of primary role, to account for secondary-role coverage.
         rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
-        shuttle_pm_anchor_dates = {
-            a.date.isoformat()
-            for a in rows
-            if a.value == SHUTTLE_PM_LABEL and a.date.isoformat() in valid_date_keys
-        }
-
         for a in rows:
             if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
@@ -1454,14 +1451,9 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 sh_counts[date_key]["Midday"] += 1
                 sh_counts[date_key]["Crew"] += 1
             else:
-                variant = _infer_shuttle_variant(
-                    shuttle_value,
-                    custom_time_counts_as_crew=date_key in shuttle_pm_anchor_dates,
-                )
+                variant = _infer_shuttle_variant(shuttle_value)
                 if variant:
                     sh_counts[date_key][variant] += 1
-                elif is_suggested_crew_label(shuttle_value):
-                    sh_counts[date_key]["Crew"] += 1
 
 
             # Breakfast variants (exact labels)
@@ -1594,7 +1586,7 @@ def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
                 for sec_name in (emp_sections.get(eid) or set()):
                     if sec_name and a.value in section_shifts(sec_name):
                         active += 1
-                    elif sec_name == "Shuttle" and is_suggested_crew_label(val):
+                    elif sec_name == "Shuttle" and _infer_shuttle_variant(val) is not None:
                         active += 1
                 if active > 1:
                     key = d.isoformat()
@@ -2102,6 +2094,22 @@ def shift_css_class(label: Optional[str]) -> str:
     return _match_shift_window_class(label, allow_crew_match=not _is_training_shift_label(label))
 
 
+def _shuttle_shift_css_class(label: Optional[str]) -> str:
+    if label == SHUTTLE_COMBO_LABEL:
+        return "select-orange"
+    if _is_custom_time_range_label(label):
+        variant = _infer_shuttle_variant(label)
+        if variant == "AM":
+            return "select-green"
+        if variant == "Midday":
+            return "select-blue"
+        if variant == "PM":
+            return "select-purple"
+        if variant == "Crew":
+            return "select-red"
+    return shift_css_class(label)
+
+
 @lru_cache(maxsize=1)
 def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
     variants = {
@@ -2121,7 +2129,7 @@ def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
     return resolved
 
 
-def _infer_shuttle_variant(label: Optional[str], *, custom_time_counts_as_crew: bool = False) -> Optional[str]:
+def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
     value = (label or "").strip()
     if not value:
         return None
@@ -2137,8 +2145,6 @@ def _infer_shuttle_variant(label: Optional[str], *, custom_time_counts_as_crew: 
     if value.startswith("PM (5:30PM"):
         return "PM"
     if value.startswith("Crew"):
-        return "Crew"
-    if custom_time_counts_as_crew and _is_custom_time_range_label(value) and not _is_training_shift_label(value):
         return "Crew"
     start_minutes = _shift_start_minutes(value)
     if not _is_training_shift_label(value) and start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
@@ -2161,6 +2167,11 @@ def _infer_shuttle_variant(label: Optional[str], *, custom_time_counts_as_crew: 
 @app.template_filter("shift_class")
 def shift_class_filter(label: str) -> str:
     return shift_css_class(label)
+
+
+@app.template_filter("shuttle_shift_class")
+def shuttle_shift_class_filter(label: str) -> str:
+    return _shuttle_shift_css_class(label)
 
 
 def combined_shift_options(section_names: Iterable[str]) -> List[str]:
@@ -4481,7 +4492,7 @@ def generate_4_week_schedule(start_week_id: int):
                 if role == "Shuttle":
                     # No AM after a previous-day late shift (PM or Crew ends after midnight)
                     prev_val = a_prev.value or ""
-                    prev_was_crew = prev_val.startswith("Crew") or is_suggested_crew_label(prev_val)
+                    prev_was_crew = _infer_shuttle_variant(prev_val) == "Crew"
                     if label.startswith("AM") and (prev_val.startswith("PM") or prev_was_crew):
                         return False
                     # Be cautious with Midday after Crew (only ~8h45m rest)
@@ -5569,10 +5580,7 @@ def export_schedule_excel(week_id: int):
                 return False
             if value == SHUTTLE_COMBO_LABEL:
                 return True
-            return _infer_shuttle_variant(
-                value,
-                custom_time_counts_as_crew=bool(date_key and date_key in shuttle_pm_anchor_dates),
-            ) == "Crew"
+            return _infer_shuttle_variant(value) == "Crew"
 
         # Fill in the shift data
         import re
