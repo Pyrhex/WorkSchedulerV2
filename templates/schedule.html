@@ -137,7 +137,7 @@
                     {% endfor %}
                     <option value="__custom__">Custom time…</option>
                     {% if val and (val not in options) %}
-                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                      <option value="{{ val }}" data-custom="1" selected>{{ val | format_shift }}</option>
                     {% endif %}
                   </select>
                 </div>
@@ -241,7 +241,7 @@
                     {% endfor %}
                     <option value="__custom__">Custom time…</option>
                     {% if val and (val not in options) and (not suggestion or suggestion != val) %}
-                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                      <option value="{{ val }}" data-custom="1" selected>{{ val | format_shift }}</option>
                     {% endif %}
                     {% if suggestion %}
                       <option value="{{ suggestion }}" data-suggestion="1" data-suggestion-text="{{ suggestion }}" data-suggestion-label="{{ suggestion }} (Suggested)" {% if suggestion == val %}selected{% endif %}>
@@ -292,7 +292,7 @@
                     {% endfor %}
                     <option value="__custom__">Custom time…</option>
                     {% if val and (val not in options) %}
-                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                      <option value="{{ val }}" data-custom="1" selected>{{ val | format_shift }}</option>
                     {% endif %}
                   </select>
                 </div>
@@ -422,7 +422,7 @@
                     {% endfor %}
                     <option value="__custom__">Custom time…</option>
                     {% if val and (val not in options) %}
-                      <option value="{{ val }}" data-custom="1" selected>{{ val }}</option>
+                      <option value="{{ val }}" data-custom="1" selected>{{ val | format_shift }}</option>
                     {% endif %}
                   </select>
                 </div>

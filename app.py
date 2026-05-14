@@ -9,6 +9,7 @@ import re
 import shutil
 import time
 import uuid
+from dataclasses import dataclass
 from copy import copy as copy_style
 from threading import RLock
 from functools import lru_cache
@@ -250,11 +251,20 @@ def _post_discord_message(content: str, *, title: Optional[str] = None, color: O
         app.logger.warning("Discord webhook error: %s", exc)
 
 
-def _notify_schedule_change(employee: str, section: str, shift_date: date, value: str) -> None:
+def _notify_schedule_change(
+    employee: str,
+    section: str,
+    shift_date: date,
+    value: str,
+    *,
+    detail: Optional[str] = None,
+) -> None:
     message = (
         "Schedule update: "
         f"{employee} assigned to {value or 'Set'} on {shift_date.isoformat()} ({section})."
     )
+    if detail:
+        message = f"{message}\n{detail}"
     _post_discord_message(message, title="Schedule Updated", color=0x5865F2)
 
 
@@ -604,6 +614,25 @@ MAX_AIRCREW_IMPORT_WARNINGS = 20
 AIRCREW_TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?", re.IGNORECASE)
 CUSTOM_SHIFT_TIME_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])", re.IGNORECASE)
 CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45
+CUSTOM_SHUTTLE_CREW_CUTOFF_MINUTES = 17 * 60
+SHUTTLE_INFERENCE_NEARBY_ARRIVAL_BUFFER_MINUTES = 90
+
+
+@dataclass
+class ShuttleInferenceResult:
+    variant: Optional[str]
+    confidence: float
+    scores: dict[str, float]
+    reasons: list[str]
+
+    @property
+    def debug_string(self) -> str:
+        score_bits = ", ".join(
+            f"{variant}={self.scores.get(variant, 0.0):.2f}"
+            for variant in ("AM", "Midday", "PM", "Crew")
+        )
+        reason_bits = "; ".join(self.reasons[:4]) if self.reasons else "no strong signals"
+        return f"variant={self.variant or 'None'} confidence={self.confidence:.2f} scores[{score_bits}] reasons[{reason_bits}]"
 
 
 def _clean_header_value(value: Any) -> str:
@@ -1000,6 +1029,28 @@ def _format_aircrew_time_display(value: str) -> str:
     suffix = "am" if hour < 12 else "pm"
     display_hour = hour % 12 or 12
     return f"{display_hour}:{minute:02d}{suffix}"
+
+
+def _aircrew_minutes_for_day(session: Session, week_id: int, target_date: date) -> list[int]:
+    minutes: set[int] = set()
+    rows = list(
+        session.scalars(
+            select(AircrewArrival).where(
+                AircrewArrival.week_id == week_id,
+                AircrewArrival.date == target_date,
+            )
+        )
+    )
+    for row in rows:
+        for time_value in _deserialize_aircrew_times(row.times):
+            try:
+                hour, minute = map(int, time_value.split(":", 1))
+            except Exception:
+                continue
+            total = (hour * 60) + minute
+            if 0 <= total < (24 * 60):
+                minutes.add(total)
+    return sorted(minutes)
 
 
 def _format_minutes_clock(total_minutes: int) -> str:
@@ -1424,6 +1475,19 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
         # regardless of primary role, to account for secondary-role coverage.
         rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
+        shuttle_values_by_date: dict[str, list[str]] = {key: [] for key in dates}
+        for row in rows:
+            row_value = row.value or ""
+            if not row_value or row_value in NEUTRAL_ASSIGNMENT_VALUES:
+                continue
+            row_key = row.date.isoformat()
+            if row_key not in valid_date_keys:
+                continue
+            shuttle_values_by_date[row_key].append(row_value)
+        aircrew_minutes_by_date = {
+            key: _aircrew_minutes_for_day(s, week_id, date.fromisoformat(key))
+            for key in dates
+        }
         for a in rows:
             if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
@@ -1451,7 +1515,11 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 sh_counts[date_key]["Midday"] += 1
                 sh_counts[date_key]["Crew"] += 1
             else:
-                variant = _infer_shuttle_variant(shuttle_value)
+                variant = _infer_shuttle_variant(
+                    shuttle_value,
+                    aircrew_arrival_minutes=aircrew_minutes_by_date.get(date_key),
+                    same_day_shuttle_values=shuttle_values_by_date.get(date_key),
+                )
                 if variant:
                     sh_counts[date_key][variant] += 1
 
@@ -2107,6 +2175,7 @@ def _shuttle_shift_css_class(label: Optional[str]) -> str:
             return "select-purple"
         if variant == "Crew":
             return "select-red"
+        return _match_shift_window_class(label, allow_crew_match=not _is_training_shift_label(label))
     return shift_css_class(label)
 
 
@@ -2129,39 +2198,152 @@ def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
     return resolved
 
 
-def _infer_shuttle_variant(label: Optional[str]) -> Optional[str]:
+def _minutes_until_window(start: int, end: int, point: int) -> int:
+    if start <= point <= end:
+        return 0
+    return min(abs(point - start), abs(point - end))
+
+
+def _shuttle_variant_score_result(
+    label: Optional[str],
+    *,
+    aircrew_arrival_minutes: Optional[Iterable[int]] = None,
+    same_day_shuttle_values: Optional[Iterable[str]] = None,
+) -> ShuttleInferenceResult:
     value = (label or "").strip()
+    default_scores = {"AM": 0.0, "Midday": 0.0, "PM": 0.0, "Crew": 0.0}
     if not value:
-        return None
-    # Only infer shuttle coverage from shuttle-style labels or custom time ranges.
-    # Known labels from other departments can overlap the shuttle windows by time,
-    # but they should never satisfy shuttle staffing.
+        return ShuttleInferenceResult(None, 0.0, default_scores, ["blank label"])
     if value in BREAKFAST_SHIFTS or value in FRONT_DESK_SHIFTS or value in MAINTENANCE_SHIFTS:
-        return None
+        return ShuttleInferenceResult(None, 0.0, default_scores, ["non-shuttle label"])
     if value == "AM (3:30AM–11:30AM)":
-        return "AM"
+        return ShuttleInferenceResult("AM", 1.0, {"AM": 10.0, "Midday": 0.0, "PM": 0.0, "Crew": 0.0}, ["explicit AM label"])
     if value.startswith("Midday"):
-        return "Midday"
+        return ShuttleInferenceResult("Midday", 1.0, {"AM": 0.0, "Midday": 10.0, "PM": 0.0, "Crew": 0.0}, ["explicit Midday label"])
     if value.startswith("PM (5:30PM"):
-        return "PM"
+        return ShuttleInferenceResult("PM", 1.0, {"AM": 0.0, "Midday": 0.0, "PM": 10.0, "Crew": 0.0}, ["explicit PM label"])
     if value.startswith("Crew"):
-        return "Crew"
-    start_minutes = _shift_start_minutes(value)
-    if not _is_training_shift_label(value) and start_minutes is not None and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
-        return "Crew"
+        return ShuttleInferenceResult("Crew", 1.0, {"AM": 0.0, "Midday": 0.0, "PM": 0.0, "Crew": 10.0}, ["explicit Crew label"])
     start, end = _shift_window_minutes(value)
     if start is None or end is None:
-        return None
-    best_variant = None
-    best_overlap = 0
-    for variant, (win_start, win_end) in _shuttle_variant_windows().items():
-        if variant == "Crew" and _is_training_shift_label(value):
+        return ShuttleInferenceResult(None, 0.0, default_scores, ["no recognizable time window"])
+
+    is_custom = _is_custom_time_range_label(value)
+    is_training = _is_training_shift_label(value)
+    duration_minutes = max(0, end - start)
+    start_minutes = _shift_start_minutes(value)
+    scores = dict(default_scores)
+    reasons: list[str] = []
+
+    windows = _shuttle_variant_windows()
+    overlaps: dict[str, int] = {}
+    for variant, (win_start, win_end) in windows.items():
+        if variant == "Crew" and is_training:
+            overlaps[variant] = 0
             continue
         overlap = _window_overlap_minutes(start, end, win_start, win_end)
-        if overlap >= 300 and overlap > best_overlap:
-            best_variant = variant
-            best_overlap = overlap
-    return best_variant
+        overlaps[variant] = overlap
+        if overlap > 0:
+            boost = overlap / 60.0
+            scores[variant] += boost
+            reasons.append(f"{variant} overlap {overlap}m (+{boost:.2f})")
+
+    if is_custom:
+        scores["Crew"] += 0.5
+        reasons.append("custom time range boosts Crew (+0.50)")
+
+    if start_minutes is not None:
+        if start_minutes < 8 * 60:
+            scores["AM"] += 1.0
+            reasons.append("early start boosts AM (+1.00)")
+        if 9 * 60 <= start_minutes <= 12 * 60:
+            scores["Midday"] += 0.75
+            reasons.append("mid-morning start boosts Midday (+0.75)")
+        if start_minutes >= 14 * 60:
+            scores["PM"] += 0.75
+            reasons.append("later start boosts PM (+0.75)")
+        if is_custom and start_minutes >= 15 * 60:
+            scores["Crew"] += 1.5
+            reasons.append("late custom start boosts Crew (+1.50)")
+        if is_custom and start_minutes >= CUSTOM_SHUTTLE_CREW_CUTOFF_MINUTES:
+            scores["Crew"] += 2.0
+            reasons.append("5pm-or-later custom shift boosts Crew (+2.00)")
+        elif not is_training and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
+            scores["Crew"] += 1.0
+            reasons.append("very late start boosts Crew (+1.00)")
+
+    if duration_minutes and duration_minutes < 8 * 60:
+        duration_boost = min(2.0, max(0.5, ((8 * 60) - duration_minutes) / 90.0))
+        scores["Crew"] += duration_boost
+        reasons.append(f"shorter-than-8h shift boosts Crew (+{duration_boost:.2f})")
+
+    other_values = [
+        (item or "").strip()
+        for item in (same_day_shuttle_values or [])
+        if item and (item or "").strip() not in NEUTRAL_ASSIGNMENT_VALUES
+    ]
+    other_values = [item for item in other_values if item != value]
+    has_standard_midday = any(item.startswith("Midday") or item == SHUTTLE_COMBO_LABEL for item in other_values)
+    has_standard_pm = any(item.startswith("PM (5:30PM") for item in other_values)
+    if is_custom and has_standard_midday and overlaps.get("Midday", 0) > 0:
+        scores["Crew"] += 0.75
+        reasons.append("standard Midday already present boosts Crew (+0.75)")
+    if is_custom and has_standard_pm and max(overlaps.get("PM", 0), overlaps.get("Crew", 0)) > 0:
+        scores["Crew"] += 1.0
+        reasons.append("standard PM already present boosts Crew (+1.00)")
+
+    normalized_arrivals = sorted(
+        {
+            minutes
+            for minutes in (aircrew_arrival_minutes or [])
+            if isinstance(minutes, int) and 0 <= minutes < (24 * 60)
+        }
+    )
+    nearby_arrivals = 0
+    inside_arrivals = 0
+    late_arrivals = 0
+    for arrival in normalized_arrivals:
+        arrival_options = [arrival, arrival + (24 * 60)]
+        distance = min(_minutes_until_window(start, end, option) for option in arrival_options)
+        if distance <= SHUTTLE_INFERENCE_NEARBY_ARRIVAL_BUFFER_MINUTES:
+            nearby_arrivals += 1
+        if any(start <= option <= end for option in arrival_options):
+            inside_arrivals += 1
+        if arrival >= 16 * 60:
+            late_arrivals += 1
+    if nearby_arrivals:
+        nearby_boost = min(2.5, nearby_arrivals * 0.75)
+        scores["Crew"] += nearby_boost
+        reasons.append(f"{nearby_arrivals} nearby aircrew arrival(s) boost Crew (+{nearby_boost:.2f})")
+    if inside_arrivals:
+        inside_boost = min(1.5, inside_arrivals * 0.5)
+        scores["Crew"] += inside_boost
+        reasons.append(f"{inside_arrivals} arrival(s) inside shift boost Crew (+{inside_boost:.2f})")
+    if late_arrivals and start_minutes is not None and start_minutes >= 12 * 60:
+        late_boost = min(1.5, late_arrivals * 0.5)
+        scores["Crew"] += late_boost
+        reasons.append(f"{late_arrivals} late arrival(s) boost Crew (+{late_boost:.2f})")
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_variant, best_score = ranked[0]
+    runner_up_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best_score <= 0.0:
+        return ShuttleInferenceResult(None, 0.0, scores, reasons or ["no positive scoring signals"])
+    confidence = 1.0 if best_score <= 0 else max(0.05, min(1.0, (best_score - runner_up_score) / max(best_score, 1.0)))
+    return ShuttleInferenceResult(best_variant, confidence, scores, reasons)
+
+
+def _infer_shuttle_variant(
+    label: Optional[str],
+    *,
+    aircrew_arrival_minutes: Optional[Iterable[int]] = None,
+    same_day_shuttle_values: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    return _shuttle_variant_score_result(
+        label,
+        aircrew_arrival_minutes=aircrew_arrival_minutes,
+        same_day_shuttle_values=same_day_shuttle_values,
+    ).variant
 
 
 @app.template_filter("shift_class")
@@ -2224,6 +2406,7 @@ def format_shift(label: str) -> str:
     label = re.sub(r"\s*-\s*", " - ", label)
     # Lowercase AM/PM tokens (handles attached forms like 6:00AM)
     label = re.sub(r"AM|PM", lambda m: m.group(0).lower(), label)
+    label = _strip_leading_zero_from_display_times(label)
     return _compact_evening_crew_display(label)
 
 
@@ -2236,6 +2419,12 @@ def _parenthetical_time_text(label: str) -> Optional[str]:
         return None
     inner = label[start:end]
     return inner if len(_shift_time_points(inner)) >= 2 else None
+
+
+def _strip_leading_zero_from_display_times(label: str) -> str:
+    if not label:
+        return label
+    return re.sub(r"\b0(\d:\d{2}(?:am|pm))\b", r"\1", label, flags=re.IGNORECASE)
 
 
 def _compact_evening_crew_display(label: str) -> str:
@@ -3169,7 +3358,35 @@ def assign():
         "double_booked": double_booked_snapshot(week.id),
     }
 
-    _notify_schedule_change(employee_name, section, dte, final_value)
+    notify_detail: Optional[str] = None
+    if section == "Shuttle" and final_value and final_value not in NEUTRAL_ASSIGNMENT_VALUES:
+        with SessionLocal() as s:
+            same_day_values = [
+                row.value or ""
+                for row in s.scalars(
+                    select(Assignment).where(
+                        Assignment.week_id == week.id,
+                        Assignment.date == dte,
+                    )
+                )
+                if row.value
+            ]
+            aircrew_minutes = _aircrew_minutes_for_day(s, week.id, dte)
+        inference = _shuttle_variant_score_result(
+            final_value,
+            aircrew_arrival_minutes=aircrew_minutes,
+            same_day_shuttle_values=same_day_values,
+        )
+        notify_detail = f"Shuttle inference: {inference.debug_string}"
+        response_payload["shuttle_inference"] = {
+            "variant": inference.variant,
+            "confidence": inference.confidence,
+            "scores": inference.scores,
+            "reasons": inference.reasons,
+            "debug": inference.debug_string,
+        }
+
+    _notify_schedule_change(employee_name, section, dte, final_value, detail=notify_detail)
     return jsonify(response_payload)
 
 
@@ -5599,6 +5816,7 @@ def export_schedule_excel(week_id: int):
             raw = re.sub(r"\s*-\s*", " - ", raw)
             # Lowercase AM/PM tokens (including attached to times)
             raw = re.sub(r"AM|PM", lambda m: m.group(0).lower(), raw)
+            raw = _strip_leading_zero_from_display_times(raw)
             # Specific display tweak for the combo shuttle shift requested by the team
             if original.strip().lower() == SHUTTLE_COMBO_LABEL.lower():
                 return "10:30am - 6:30pm (c)"
