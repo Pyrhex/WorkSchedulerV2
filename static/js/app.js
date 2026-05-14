@@ -6,7 +6,6 @@ const SHUTTLE_PM_LABEL = 'PM (5:30PM–1:30AM)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
 const SHIFT_TIME_REGEX_GLOBAL = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/ig;
 const CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45;
-const CUSTOM_SHUTTLE_CREW_CUTOFF_MINUTES = 17 * 60;
 const SHUTTLE_INFERENCE_NEARBY_ARRIVAL_BUFFER_MINUTES = 90;
 const CUSTOM_SHIFT_VALUE = '__custom__';
 const CANONICAL_SHIFT_LABELS = [
@@ -194,6 +193,74 @@ function minutesUntilWindow(start, end, point) {
   return Math.min(Math.abs(point - start), Math.abs(point - end));
 }
 
+function shuttleStandardFitDetails(start, end, durationMinutes, startMinutes, variantWindows, overlaps) {
+  const fitScores = {};
+  let bestVariant = null;
+  let bestFit = 0;
+  ['AM', 'Midday', 'PM'].forEach(variant => {
+    const refWindow = variantWindows[variant];
+    const overlap = overlaps[variant] || 0;
+    if (!refWindow || overlap <= 0) return;
+    const windowMinutes = Math.max(1, refWindow[1] - refWindow[0]);
+    const shiftCoverage = overlap / Math.max(durationMinutes, 1);
+    const windowCoverage = overlap / windowMinutes;
+    let boundaryScore = 0;
+    if (startMinutes !== null) {
+      boundaryScore += Math.max(0, 1 - (Math.abs(startMinutes - refWindow[0]) / 120));
+    }
+    boundaryScore += Math.max(0, 1 - (Math.abs(end - refWindow[1]) / 120));
+    const fitScore = (shiftCoverage * 2.5) + (windowCoverage * 1.75) + boundaryScore;
+    fitScores[variant] = fitScore;
+    if (fitScore > bestFit) {
+      bestFit = fitScore;
+      bestVariant = variant;
+    }
+  });
+  return { bestVariant, bestFit, fitScores };
+}
+
+function shuttleCustomCrewCandidateScore(value, variantWindows) {
+  const window = shiftWindowMinutes(value);
+  if (!window) return { score: 0, bestVariant: null, bestFit: 0 };
+  const [start, end] = window;
+  const durationMinutes = Math.max(0, end - start);
+  const startMinutes = shiftStartMinutes(value);
+  const overlaps = {};
+  Object.entries(variantWindows).forEach(([variant, refWindow]) => {
+    overlaps[variant] = refWindow ? windowOverlapMinutes(start, end, refWindow[0], refWindow[1]) : 0;
+  });
+  const { bestVariant, bestFit } = shuttleStandardFitDetails(
+    start,
+    end,
+    durationMinutes,
+    startMinutes,
+    variantWindows,
+    overlaps,
+  );
+  const crewOverlapHours = (overlaps.Crew || 0) / 60;
+  const shortBonus = durationMinutes < 8 * 60 ? 1.0 : 0.0;
+  const irregularityBonus = Math.max(0, 2.5 - bestFit);
+  const lateBonus = startMinutes !== null && startMinutes >= 15 * 60 ? 0.5 : 0.0;
+  return { score: crewOverlapHours + shortBonus + irregularityBonus + lateBonus, bestVariant, bestFit };
+}
+
+function fixedShuttleVariant(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized || normalized === 'Set' || normalized === CUSTOM_OFF_VALUE || normalized === CUSTOM_NA_VALUE || TIME_OFF_VALUES.has(normalized)) return null;
+  if (normalized === SHUTTLE_COMBO_LABEL) return 'Midday';
+  if (normalized === 'AM (3:30AM–11:30AM)') return 'AM';
+  if (normalized.startsWith('Midday')) return 'Midday';
+  if (normalized.startsWith('PM (5:30PM')) return 'PM';
+  if (normalized.startsWith('Crew')) return 'Crew';
+  return null;
+}
+
+function reservedShuttleVariants(value) {
+  if (value === SHUTTLE_COMBO_LABEL) return new Set(['Midday', 'Crew']);
+  const fixed = fixedShuttleVariant(value);
+  return fixed ? new Set([fixed]) : new Set();
+}
+
 function shiftStartMinutes(value) {
   const points = shiftTimePoints(value);
   return points.length ? points[0] : null;
@@ -306,10 +373,8 @@ function inferShuttleVariantResult(value, context = {}) {
   const scores = { AM: 0, Midday: 0, PM: 0, Crew: 0 };
   const reasons = [];
   if (!value) return null;
-  if (value === 'AM (3:30AM–11:30AM)') return { variant: 'AM', confidence: 1, scores: { ...scores, AM: 10 }, reasons: ['explicit AM label'] };
-  if (value.startsWith('Midday')) return { variant: 'Midday', confidence: 1, scores: { ...scores, Midday: 10 }, reasons: ['explicit Midday label'] };
-  if (value.startsWith('PM (5:30PM')) return { variant: 'PM', confidence: 1, scores: { ...scores, PM: 10 }, reasons: ['explicit PM label'] };
-  if (value.startsWith('Crew')) return { variant: 'Crew', confidence: 1, scores: { ...scores, Crew: 10 }, reasons: ['explicit Crew label'] };
+  const fixedVariant = fixedShuttleVariant(value);
+  if (fixedVariant) return { variant: fixedVariant, confidence: 1, scores: { ...scores, [fixedVariant]: 10 }, reasons: [`explicit ${fixedVariant} label`] };
   const startMinutes = shiftStartMinutes(value);
   const window = shiftWindowMinutes(value);
   if (!window) return null;
@@ -323,6 +388,7 @@ function inferShuttleVariantResult(value, context = {}) {
     ['PM', shiftWindowMinutes(SHUTTLE_PM_LABEL)],
     ['Crew', shiftWindowMinutes('Crew (5:45PM–1:45AM)')],
   ];
+  const variantWindows = Object.fromEntries(variants);
   const overlaps = {};
   variants.forEach(([variant, refWindow]) => {
     if (!refWindow || (variant === 'Crew' && isTraining)) {
@@ -338,8 +404,34 @@ function inferShuttleVariantResult(value, context = {}) {
     }
   });
   if (isCustom) {
-    scores.Crew += 0.5;
-    reasons.push('custom time range boosts Crew (+0.50)');
+    scores.Crew += 0.25;
+    reasons.push('custom time range slightly boosts Crew (+0.25)');
+    const { bestVariant: bestStandardVariant, bestFit: bestStandardFit, fitScores } = shuttleStandardFitDetails(
+      start,
+      end,
+      durationMinutes,
+      startMinutes,
+      variantWindows,
+      overlaps,
+    );
+    Object.entries(fitScores).forEach(([variant, fitScore]) => {
+      scores[variant] += fitScore;
+      reasons.push(`custom shift fits ${variant} window (+${fitScore.toFixed(2)})`);
+    });
+    if (bestStandardFit >= 4.5) {
+      scores.Crew -= 2.0;
+      reasons.push('strong standard-window fit reduces Crew (-2.00)');
+    } else if (bestStandardFit >= 3.0) {
+      scores.Crew -= 1.0;
+      reasons.push('moderate standard-window fit reduces Crew (-1.00)');
+    } else {
+      scores.Crew += 1.0;
+      reasons.push('weak standard-window fit boosts Crew (+1.00)');
+    }
+    if (bestStandardVariant === 'PM' && durationMinutes >= 7 * 60) {
+      scores.PM += 1.0;
+      reasons.push('long PM-like shift boosts PM (+1.00)');
+    }
   }
   if (startMinutes !== null) {
     if (startMinutes < 8 * 60) {
@@ -354,14 +446,7 @@ function inferShuttleVariantResult(value, context = {}) {
       scores.PM += 0.75;
       reasons.push('later start boosts PM (+0.75)');
     }
-    if (isCustom && startMinutes >= 15 * 60) {
-      scores.Crew += 1.5;
-      reasons.push('late custom start boosts Crew (+1.50)');
-    }
-    if (isCustom && startMinutes >= CUSTOM_SHUTTLE_CREW_CUTOFF_MINUTES) {
-      scores.Crew += 2.0;
-      reasons.push('5pm-or-later custom shift boosts Crew (+2.00)');
-    } else if (!isTraining && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) {
+    if (!isCustom && !isTraining && startMinutes >= CREW_SHIFT_CUTOFF_MINUTES) {
       scores.Crew += 1.0;
       reasons.push('very late start boosts Crew (+1.00)');
     }
@@ -370,17 +455,6 @@ function inferShuttleVariantResult(value, context = {}) {
     const durationBoost = Math.min(2.0, Math.max(0.5, ((8 * 60) - durationMinutes) / 90));
     scores.Crew += durationBoost;
     reasons.push(`shorter-than-8h shift boosts Crew (+${durationBoost.toFixed(2)})`);
-  }
-  const sameDayValues = Array.isArray(context.sameDayValues) ? context.sameDayValues.filter(Boolean).filter(item => item !== value) : [];
-  const hasStandardMidday = sameDayValues.some(item => item.startsWith('Midday') || item === SHUTTLE_COMBO_LABEL);
-  const hasStandardPm = sameDayValues.some(item => item.startsWith('PM (5:30PM'));
-  if (isCustom && hasStandardMidday && (overlaps.Midday || 0) > 0) {
-    scores.Crew += 0.75;
-    reasons.push('standard Midday already present boosts Crew (+0.75)');
-  }
-  if (isCustom && hasStandardPm && Math.max(overlaps.PM || 0, overlaps.Crew || 0) > 0) {
-    scores.Crew += 1.0;
-    reasons.push('standard PM already present boosts Crew (+1.00)');
   }
   const normalizedArrivals = Array.isArray(context.aircrewArrivalMinutes)
     ? Array.from(new Set(context.aircrewArrivalMinutes.filter(minutes => Number.isInteger(minutes) && minutes >= 0 && minutes < (24 * 60)))).sort((a, b) => a - b)
@@ -417,6 +491,55 @@ function inferShuttleVariantResult(value, context = {}) {
   if (!(bestScore > 0)) return { variant: null, confidence: 0, scores, reasons };
   const confidence = Math.max(0.05, Math.min(1, (bestScore - runnerUpScore) / Math.max(bestScore, 1)));
   return { variant: bestVariant, confidence, scores, reasons };
+}
+
+function resolveShuttleVariantsForDate(dateKey) {
+  const entries = Array.from(document.querySelectorAll(`.schedule-table[aria-label="Shuttle"] .cell[data-date="${dateKey}"] select.shift-select`));
+  const aircrewArrivalMinutes = shuttleInferenceContextForCell(entries[0] ? entries[0].closest('.cell') : null, '').aircrewArrivalMinutes;
+  const resolved = new Map();
+  const assignedVariants = new Set();
+  const candidates = [];
+
+  entries.forEach((sel, idx) => {
+    const value = sel.value;
+    const fixedVariant = fixedShuttleVariant(value);
+    if (fixedVariant) {
+      resolved.set(sel, fixedVariant);
+      reservedShuttleVariants(value).forEach(variant => assignedVariants.add(variant));
+      return;
+    }
+    if (!value || value === 'Set' || value === CUSTOM_OFF_VALUE || value === CUSTOM_NA_VALUE || TIME_OFF_VALUES.has(value)) {
+      resolved.set(sel, null);
+      return;
+    }
+    const result = inferShuttleVariantResult(value, { aircrewArrivalMinutes });
+    const rankedVariants = result ? Object.entries(result.scores).sort((a, b) => b[1] - a[1]) : [];
+    candidates.push({ idx, sel, result, rankedVariants });
+  });
+
+  candidates.sort((a, b) => {
+    const aScore = a.result ? (a.result.scores[a.result.variant] || 0) : 0;
+    const bScore = b.result ? (b.result.scores[b.result.variant] || 0) : 0;
+    const aConfidence = a.result ? a.result.confidence : 0;
+    const bConfidence = b.result ? b.result.confidence : 0;
+    if (bConfidence !== aConfidence) return bConfidence - aConfidence;
+    return bScore - aScore;
+  });
+
+  candidates.forEach(({ sel, result, rankedVariants }) => {
+    let chosenVariant = null;
+    rankedVariants.forEach(([variant, score]) => {
+      if (chosenVariant || score <= 0) return;
+      if (!assignedVariants.has(variant)) {
+        chosenVariant = variant;
+      }
+    });
+    if (!chosenVariant && result) chosenVariant = result.variant;
+    resolved.set(sel, chosenVariant);
+    if (chosenVariant) assignedVariants.add(chosenVariant);
+  });
+
+  return resolved;
 }
 
 function inferShuttleVariant(value, context = {}) {
@@ -465,8 +588,20 @@ function updateSelectClass(selectEl, section, value) {
     'select-orange',
   );
   const cell = selectEl.closest('.cell');
-  const context = section === 'Shuttle' ? shuttleInferenceContextForCell(cell, value) : {};
-  const cls = selectClassForValue(section, value, context);
+  let cls = '';
+  if (section === 'Shuttle' && cell) {
+    const dateKey = cell.getAttribute('data-date');
+    const resolved = dateKey ? resolveShuttleVariantsForDate(dateKey) : new Map();
+    const variant = resolved.get(selectEl);
+    if (variant === 'AM') cls = 'select-green';
+    else if (variant === 'Midday') cls = 'select-blue';
+    else if (variant === 'PM') cls = 'select-purple';
+    else if (variant === 'Crew') cls = 'select-red';
+    else cls = selectClassForValue(section, value, {});
+  } else {
+    const context = section === 'Shuttle' ? shuttleInferenceContextForCell(cell, value) : {};
+    cls = selectClassForValue(section, value, context);
+  }
   if (cls) selectEl.classList.add(cls);
 }
 

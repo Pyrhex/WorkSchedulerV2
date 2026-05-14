@@ -614,7 +614,6 @@ MAX_AIRCREW_IMPORT_WARNINGS = 20
 AIRCREW_TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?", re.IGNORECASE)
 CUSTOM_SHIFT_TIME_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])", re.IGNORECASE)
 CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45
-CUSTOM_SHUTTLE_CREW_CUTOFF_MINUTES = 17 * 60
 SHUTTLE_INFERENCE_NEARBY_ARRIVAL_BUFFER_MINUTES = 90
 
 
@@ -1470,24 +1469,32 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         fd_label_counts: dict[str, dict[str, dict[str, int]]] = {k: {"AM": {}, "PM": {}, "Audit": {}} for k in dates}
         employee_names = dict(s.execute(select(Employee.id, Employee.name)).all())
         target_breakfast_shifts: dict[str, dict[str, str]] = {k: {} for k in dates}
-        
-        # Count Front Desk assignments per shift variant per day
-        # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
-        # regardless of primary role, to account for secondary-role coverage.
-        rows = list(s.scalars(select(Assignment).where(Assignment.week_id == week_id)))
-        shuttle_values_by_date: dict[str, list[str]] = {key: [] for key in dates}
+        rows = list(
+            s.scalars(
+                select(Assignment)
+                .where(Assignment.week_id == week_id)
+                .order_by(Assignment.date, Assignment.employee_id)
+            )
+        )
+        shuttle_rows_by_date: dict[str, list[Assignment]] = {key: [] for key in dates}
         for row in rows:
-            row_value = row.value or ""
-            if not row_value or row_value in NEUTRAL_ASSIGNMENT_VALUES:
-                continue
             row_key = row.date.isoformat()
-            if row_key not in valid_date_keys:
-                continue
-            shuttle_values_by_date[row_key].append(row_value)
+            if row_key in valid_date_keys:
+                shuttle_rows_by_date[row_key].append(row)
         aircrew_minutes_by_date = {
             key: _aircrew_minutes_for_day(s, week_id, date.fromisoformat(key))
             for key in dates
         }
+        resolved_shuttle_variants_by_date: dict[str, list[Optional[str]]] = {}
+        for key, date_rows in shuttle_rows_by_date.items():
+            resolved_shuttle_variants_by_date[key] = _resolve_shuttle_variants_for_values(
+                [row.value for row in date_rows],
+                aircrew_arrival_minutes=aircrew_minutes_by_date.get(key),
+            )
+
+        # Count Front Desk assignments per shift variant per day
+        # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
+        # regardless of primary role, to account for secondary-role coverage.
         for a in rows:
             if not a.value or a.value in NEUTRAL_ASSIGNMENT_VALUES:
                 continue
@@ -1508,18 +1515,10 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                     counts[date_key]["Audit"] += 1
                     fd_label_counts[date_key]["Audit"][a.value] = fd_label_counts[date_key]["Audit"].get(a.value, 0) + 1
 
-            shuttle_value = a.value or ""
-            # Shuttle variants: include dynamic crew suggestions so coverage stays accurate
-            variant: Optional[str] = None
-            if shuttle_value == SHUTTLE_COMBO_LABEL:
-                sh_counts[date_key]["Midday"] += 1
-                sh_counts[date_key]["Crew"] += 1
-            else:
-                variant = _infer_shuttle_variant(
-                    shuttle_value,
-                    aircrew_arrival_minutes=aircrew_minutes_by_date.get(date_key),
-                    same_day_shuttle_values=shuttle_values_by_date.get(date_key),
-                )
+            if a in shuttle_rows_by_date.get(date_key, []):
+                date_rows = shuttle_rows_by_date[date_key]
+                idx = date_rows.index(a)
+                variant = resolved_shuttle_variants_by_date.get(date_key, [None] * len(date_rows))[idx]
                 if variant:
                     sh_counts[date_key][variant] += 1
 
@@ -2198,10 +2197,95 @@ def _shuttle_variant_windows() -> dict[str, tuple[int, int]]:
     return resolved
 
 
+def _fixed_shuttle_variant(value: Optional[str]) -> Optional[str]:
+    normalized = (value or "").strip()
+    if not normalized or normalized in NEUTRAL_ASSIGNMENT_VALUES:
+        return None
+    if normalized == SHUTTLE_COMBO_LABEL:
+        return "Midday"
+    if normalized == "AM (3:30AM–11:30AM)":
+        return "AM"
+    if normalized.startswith("Midday"):
+        return "Midday"
+    if normalized.startswith("PM (5:30PM"):
+        return "PM"
+    if normalized.startswith("Crew"):
+        return "Crew"
+    return None
+
+
+def _reserved_shuttle_variants(value: Optional[str]) -> set[str]:
+    normalized = (value or "").strip()
+    if normalized == SHUTTLE_COMBO_LABEL:
+        return {"Midday", "Crew"}
+    fixed = _fixed_shuttle_variant(normalized)
+    return {fixed} if fixed else set()
+
+
 def _minutes_until_window(start: int, end: int, point: int) -> int:
     if start <= point <= end:
         return 0
     return min(abs(point - start), abs(point - end))
+
+
+def _shuttle_standard_fit_details(
+    start: int,
+    end: int,
+    duration_minutes: int,
+    start_minutes: Optional[int],
+    windows: dict[str, tuple[int, int]],
+    overlaps: dict[str, int],
+) -> tuple[Optional[str], float, dict[str, float]]:
+    fit_scores: dict[str, float] = {}
+    best_variant: Optional[str] = None
+    best_fit = 0.0
+    for variant in ("AM", "Midday", "PM"):
+        window = windows.get(variant)
+        overlap = overlaps.get(variant, 0)
+        if not window or overlap <= 0:
+            continue
+        win_start, win_end = window
+        window_minutes = max(1, win_end - win_start)
+        shift_coverage = overlap / max(duration_minutes, 1)
+        window_coverage = overlap / window_minutes
+        boundary_score = 0.0
+        if start_minutes is not None:
+            boundary_score += max(0.0, 1.0 - (abs(start_minutes - win_start) / 120.0))
+        boundary_score += max(0.0, 1.0 - (abs(end - win_end) / 120.0))
+        fit_score = (shift_coverage * 2.5) + (window_coverage * 1.75) + boundary_score
+        fit_scores[variant] = fit_score
+        if fit_score > best_fit:
+            best_fit = fit_score
+            best_variant = variant
+    return best_variant, best_fit, fit_scores
+
+
+def _shuttle_custom_crew_candidate_score(
+    label: str,
+    windows: dict[str, tuple[int, int]],
+) -> tuple[float, Optional[str], float]:
+    start, end = _shift_window_minutes(label)
+    if start is None or end is None:
+        return 0.0, None, 0.0
+    duration_minutes = max(0, end - start)
+    start_minutes = _shift_start_minutes(label)
+    overlaps = {
+        variant: _window_overlap_minutes(start, end, win_start, win_end)
+        for variant, (win_start, win_end) in windows.items()
+    }
+    best_variant, best_fit, _ = _shuttle_standard_fit_details(
+        start,
+        end,
+        duration_minutes,
+        start_minutes,
+        windows,
+        overlaps,
+    )
+    crew_overlap_hours = overlaps.get("Crew", 0) / 60.0
+    short_bonus = 1.0 if duration_minutes < 8 * 60 else 0.0
+    irregularity_bonus = max(0.0, 2.5 - best_fit)
+    late_bonus = 0.5 if start_minutes is not None and start_minutes >= 15 * 60 else 0.0
+    return crew_overlap_hours + short_bonus + irregularity_bonus + late_bonus, best_variant, best_fit
 
 
 def _shuttle_variant_score_result(
@@ -2216,14 +2300,11 @@ def _shuttle_variant_score_result(
         return ShuttleInferenceResult(None, 0.0, default_scores, ["blank label"])
     if value in BREAKFAST_SHIFTS or value in FRONT_DESK_SHIFTS or value in MAINTENANCE_SHIFTS:
         return ShuttleInferenceResult(None, 0.0, default_scores, ["non-shuttle label"])
-    if value == "AM (3:30AM–11:30AM)":
-        return ShuttleInferenceResult("AM", 1.0, {"AM": 10.0, "Midday": 0.0, "PM": 0.0, "Crew": 0.0}, ["explicit AM label"])
-    if value.startswith("Midday"):
-        return ShuttleInferenceResult("Midday", 1.0, {"AM": 0.0, "Midday": 10.0, "PM": 0.0, "Crew": 0.0}, ["explicit Midday label"])
-    if value.startswith("PM (5:30PM"):
-        return ShuttleInferenceResult("PM", 1.0, {"AM": 0.0, "Midday": 0.0, "PM": 10.0, "Crew": 0.0}, ["explicit PM label"])
-    if value.startswith("Crew"):
-        return ShuttleInferenceResult("Crew", 1.0, {"AM": 0.0, "Midday": 0.0, "PM": 0.0, "Crew": 10.0}, ["explicit Crew label"])
+    fixed_variant = _fixed_shuttle_variant(value)
+    if fixed_variant:
+        fixed_scores = {"AM": 0.0, "Midday": 0.0, "PM": 0.0, "Crew": 0.0}
+        fixed_scores[fixed_variant] = 10.0
+        return ShuttleInferenceResult(fixed_variant, 1.0, fixed_scores, [f"explicit {fixed_variant} label"])
     start, end = _shift_window_minutes(value)
     if start is None or end is None:
         return ShuttleInferenceResult(None, 0.0, default_scores, ["no recognizable time window"])
@@ -2249,8 +2330,31 @@ def _shuttle_variant_score_result(
             reasons.append(f"{variant} overlap {overlap}m (+{boost:.2f})")
 
     if is_custom:
-        scores["Crew"] += 0.5
-        reasons.append("custom time range boosts Crew (+0.50)")
+        scores["Crew"] += 0.25
+        reasons.append("custom time range slightly boosts Crew (+0.25)")
+        best_standard_variant, best_standard_fit, fit_scores = _shuttle_standard_fit_details(
+            start,
+            end,
+            duration_minutes,
+            start_minutes,
+            windows,
+            overlaps,
+        )
+        for variant, fit_score in fit_scores.items():
+            scores[variant] += fit_score
+            reasons.append(f"custom shift fits {variant} window (+{fit_score:.2f})")
+        if best_standard_fit >= 4.5:
+            scores["Crew"] -= 2.0
+            reasons.append("strong standard-window fit reduces Crew (-2.00)")
+        elif best_standard_fit >= 3.0:
+            scores["Crew"] -= 1.0
+            reasons.append("moderate standard-window fit reduces Crew (-1.00)")
+        else:
+            scores["Crew"] += 1.0
+            reasons.append("weak standard-window fit boosts Crew (+1.00)")
+        if best_standard_variant == "PM" and duration_minutes >= 7 * 60:
+            scores["PM"] += 1.0
+            reasons.append("long PM-like shift boosts PM (+1.00)")
 
     if start_minutes is not None:
         if start_minutes < 8 * 60:
@@ -2262,13 +2366,7 @@ def _shuttle_variant_score_result(
         if start_minutes >= 14 * 60:
             scores["PM"] += 0.75
             reasons.append("later start boosts PM (+0.75)")
-        if is_custom and start_minutes >= 15 * 60:
-            scores["Crew"] += 1.5
-            reasons.append("late custom start boosts Crew (+1.50)")
-        if is_custom and start_minutes >= CUSTOM_SHUTTLE_CREW_CUTOFF_MINUTES:
-            scores["Crew"] += 2.0
-            reasons.append("5pm-or-later custom shift boosts Crew (+2.00)")
-        elif not is_training and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
+        if not is_custom and not is_training and start_minutes >= CREW_SHIFT_CUTOFF_MINUTES:
             scores["Crew"] += 1.0
             reasons.append("very late start boosts Crew (+1.00)")
 
@@ -2276,21 +2374,6 @@ def _shuttle_variant_score_result(
         duration_boost = min(2.0, max(0.5, ((8 * 60) - duration_minutes) / 90.0))
         scores["Crew"] += duration_boost
         reasons.append(f"shorter-than-8h shift boosts Crew (+{duration_boost:.2f})")
-
-    other_values = [
-        (item or "").strip()
-        for item in (same_day_shuttle_values or [])
-        if item and (item or "").strip() not in NEUTRAL_ASSIGNMENT_VALUES
-    ]
-    other_values = [item for item in other_values if item != value]
-    has_standard_midday = any(item.startswith("Midday") or item == SHUTTLE_COMBO_LABEL for item in other_values)
-    has_standard_pm = any(item.startswith("PM (5:30PM") for item in other_values)
-    if is_custom and has_standard_midday and overlaps.get("Midday", 0) > 0:
-        scores["Crew"] += 0.75
-        reasons.append("standard Midday already present boosts Crew (+0.75)")
-    if is_custom and has_standard_pm and max(overlaps.get("PM", 0), overlaps.get("Crew", 0)) > 0:
-        scores["Crew"] += 1.0
-        reasons.append("standard PM already present boosts Crew (+1.00)")
 
     normalized_arrivals = sorted(
         {
@@ -2331,6 +2414,57 @@ def _shuttle_variant_score_result(
         return ShuttleInferenceResult(None, 0.0, scores, reasons or ["no positive scoring signals"])
     confidence = 1.0 if best_score <= 0 else max(0.05, min(1.0, (best_score - runner_up_score) / max(best_score, 1.0)))
     return ShuttleInferenceResult(best_variant, confidence, scores, reasons)
+
+
+def _resolve_shuttle_variants_for_values(
+    values: Iterable[Optional[str]],
+    *,
+    aircrew_arrival_minutes: Optional[Iterable[int]] = None,
+) -> list[Optional[str]]:
+    ordered_values = list(values)
+    resolved: list[Optional[str]] = [None] * len(ordered_values)
+    assigned_variants: set[str] = set()
+    custom_candidates: list[tuple[int, ShuttleInferenceResult, list[tuple[str, float]]]] = []
+
+    for idx, raw_value in enumerate(ordered_values):
+        value = (raw_value or "").strip()
+        if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
+            continue
+        fixed_variant = _fixed_shuttle_variant(value)
+        if fixed_variant:
+            resolved[idx] = fixed_variant
+            assigned_variants.update(_reserved_shuttle_variants(value))
+            continue
+        result = _shuttle_variant_score_result(
+            value,
+            aircrew_arrival_minutes=aircrew_arrival_minutes,
+        )
+        ranked_variants = sorted(result.scores.items(), key=lambda item: item[1], reverse=True)
+        custom_candidates.append((idx, result, ranked_variants))
+
+    custom_candidates.sort(
+        key=lambda item: (
+            item[1].confidence,
+            item[1].scores.get(item[1].variant or "", 0.0),
+        ),
+        reverse=True,
+    )
+
+    for idx, result, ranked_variants in custom_candidates:
+        chosen_variant = None
+        for variant, score in ranked_variants:
+            if score <= 0:
+                continue
+            if variant not in assigned_variants:
+                chosen_variant = variant
+                break
+        if not chosen_variant:
+            chosen_variant = result.variant
+        resolved[idx] = chosen_variant
+        if chosen_variant:
+            assigned_variants.add(chosen_variant)
+
+    return resolved
 
 
 def _infer_shuttle_variant(
@@ -3361,25 +3495,37 @@ def assign():
     notify_detail: Optional[str] = None
     if section == "Shuttle" and final_value and final_value not in NEUTRAL_ASSIGNMENT_VALUES:
         with SessionLocal() as s:
-            same_day_values = [
-                row.value or ""
-                for row in s.scalars(
-                    select(Assignment).where(
+            same_day_rows = list(
+                s.scalars(
+                    select(Assignment)
+                    .where(
                         Assignment.week_id == week.id,
                         Assignment.date == dte,
                     )
+                    .order_by(Assignment.employee_id)
                 )
-                if row.value
-            ]
+            )
             aircrew_minutes = _aircrew_minutes_for_day(s, week.id, dte)
         inference = _shuttle_variant_score_result(
             final_value,
             aircrew_arrival_minutes=aircrew_minutes,
-            same_day_shuttle_values=same_day_values,
         )
-        notify_detail = f"Shuttle inference: {inference.debug_string}"
+        resolved_variants = _resolve_shuttle_variants_for_values(
+            [row.value for row in same_day_rows],
+            aircrew_arrival_minutes=aircrew_minutes,
+        )
+        resolved_variant = None
+        for idx, row in enumerate(same_day_rows):
+            if row.employee_id == emp.id:
+                resolved_variant = resolved_variants[idx]
+                break
+        notify_detail = (
+            f"Shuttle inference: resolved={resolved_variant or 'None'}; "
+            f"{inference.debug_string}"
+        )
         response_payload["shuttle_inference"] = {
-            "variant": inference.variant,
+            "variant": resolved_variant,
+            "raw_variant": inference.variant,
             "confidence": inference.confidence,
             "scores": inference.scores,
             "reasons": inference.reasons,
