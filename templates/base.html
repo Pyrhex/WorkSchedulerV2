@@ -40,6 +40,9 @@
             <a href="/timeoff" class="{{ 'active' if request.path.startswith('/timeoff') else '' }}">Time Off</a>
             <a href="/schedules" class="{{ 'active' if request.path.startswith('/schedules') else '' }}">Schedules</a>
           </nav>
+          {% if recent_updates_html %}
+            <button type="button" id="updates-trigger" class="updates-trigger">Updates</button>
+          {% endif %}
           <form method="post" action="/admin/database" class="database-switcher-form database-switcher-form-inline" id="database-switcher-form">
             <input type="hidden" name="next" value="{{ request.path }}" />
             <input type="hidden" name="database_password" id="database-password-input" value="" />
@@ -72,6 +75,34 @@
     </main>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    {% if recent_updates_html %}
+      <div
+        id="updates-modal"
+        class="updates-modal"
+        data-updates-version="{{ recent_updates_version }}"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="updates-modal-title"
+        aria-hidden="true"
+        hidden
+      >
+        <button type="button" class="updates-backdrop" data-updates-close aria-label="Close recent updates"></button>
+        <section class="updates-dialog" tabindex="-1">
+          <header class="updates-header">
+            <div>
+              <span class="updates-eyebrow">What's new</span>
+              <h2 id="updates-modal-title">Recent updates</h2>
+            </div>
+            <button type="button" class="updates-close" data-updates-close aria-label="Close recent updates">&times;</button>
+          </header>
+          <div class="updates-body markdown-content">{{ recent_updates_html | safe }}</div>
+          <footer class="updates-footer">
+            <button type="button" class="btn primary" data-updates-close>Got it</button>
+          </footer>
+        </section>
+      </div>
+    {% endif %}
 
     <script>
       (function () {
@@ -111,6 +142,6 @@
         }
       })();
     </script>
-    <script src="/static/js/app.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js', v=ASSET_VERSION) }}"></script>
   </body>
   </html>

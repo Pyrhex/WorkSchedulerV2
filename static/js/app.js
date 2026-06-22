@@ -153,6 +153,58 @@ function initThemeToggle() {
   });
 }
 
+function initUpdatesModal() {
+  const modal = document.getElementById('updates-modal');
+  const trigger = document.getElementById('updates-trigger');
+  if (!modal) return;
+
+  const dialog = modal.querySelector('.updates-dialog');
+  const closeButtons = modal.querySelectorAll('[data-updates-close]');
+  const version = modal.dataset.updatesVersion || '';
+  const storageKey = `recent-updates-seen:${version}`;
+  let previouslyFocused = null;
+
+  function openModal() {
+    previouslyFocused = document.activeElement;
+    modal.hidden = false;
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
+    window.requestAnimationFrame(() => modal.classList.add('is-open'));
+    if (dialog) dialog.focus();
+  }
+
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('modal-open');
+    try {
+      localStorage.setItem(storageKey, '1');
+    } catch (err) {
+      /* localStorage may be unavailable; the popup will show on the next visit. */
+    }
+    window.setTimeout(() => {
+      modal.hidden = true;
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
+    }, 180);
+  }
+
+  if (trigger) trigger.addEventListener('click', openModal);
+  closeButtons.forEach(button => button.addEventListener('click', closeModal));
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeModal();
+  });
+
+  let hasSeenVersion = false;
+  try {
+    hasSeenVersion = localStorage.getItem(storageKey) === '1';
+  } catch (err) {
+    hasSeenVersion = false;
+  }
+  if (!hasSeenVersion) openModal();
+}
+
 function isSuggestedCrewValue(value) {
   return typeof value === 'string' && CREW_SUGGESTION_REGEX.test(value);
 }
@@ -256,9 +308,9 @@ function fixedShuttleVariant(value) {
 }
 
 function reservedShuttleVariants(value) {
-  if (value === SHUTTLE_COMBO_LABEL) return new Set(['Midday', 'Crew']);
+  if (value === SHUTTLE_COMBO_LABEL) return new Set(['Midday']);
   const fixed = fixedShuttleVariant(value);
-  return fixed ? new Set([fixed]) : new Set();
+  return fixed && fixed !== 'Crew' ? new Set([fixed]) : new Set();
 }
 
 function shiftStartMinutes(value) {
@@ -280,9 +332,50 @@ function isTrainingShiftValue(value) {
   return typeof value === 'string' && /\(\s*T\s*\)\s*$/i.test(value.trim());
 }
 
+function isQuarterPastShuttleCrewShift(value) {
+  if (!isCustomTimeRangeValue(value) || isTrainingShiftValue(value)) return false;
+  const startMinutes = shiftStartMinutes(value);
+  return startMinutes !== null && startMinutes % 60 === 15;
+}
+
 function formatCustomShiftDisplay(value) {
   if (typeof value !== 'string' || !value) return value;
   return value.replace(/\b0(\d:\d{2}(?:am|pm))\b/gi, '$1');
+}
+
+function parseCustomShiftTimeToken(token) {
+  const normalized = String(token || '').trim().toLowerCase().replace(/\s+/g, '');
+  const regularMatch = normalized.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)$/);
+  if (regularMatch) {
+    const hour = Number(regularMatch[1]);
+    const minute = Number(regularMatch[2] || '0');
+    if (hour < 1 || hour > 12 || minute > 59) return null;
+    return { hour24: (hour % 12) + (regularMatch[3] === 'pm' ? 12 : 0), minute };
+  }
+
+  const militaryMatch = normalized.match(/^(?:(\d{1,2}):(\d{2})|(\d{3,4}))$/);
+  if (!militaryMatch) return null;
+  const compact = militaryMatch[3];
+  const hour = Number(compact ? compact.slice(0, -2) : militaryMatch[1]);
+  const minute = Number(compact ? compact.slice(-2) : militaryMatch[2]);
+  if (minute > 59 || hour > 24 || (hour === 24 && minute !== 0)) return null;
+  return { hour24: hour === 24 ? 0 : hour, minute };
+}
+
+function formatRegularShiftTime({ hour24, minute }) {
+  const period = hour24 >= 12 ? 'pm' : 'am';
+  const hour = (hour24 % 12) || 12;
+  return `${hour}:${String(minute).padStart(2, '0')}${period}`;
+}
+
+function normalizeCustomShiftTimeRange(value) {
+  if (typeof value !== 'string') return null;
+  const parts = value.trim().split(/\s*(?:-|\u2013|\u2014|\bto\b)\s*/i);
+  if (parts.length !== 2) return null;
+  const start = parseCustomShiftTimeToken(parts[0]);
+  const end = parseCustomShiftTimeToken(parts[1]);
+  if (!start || !end) return null;
+  return `${formatRegularShiftTime(start)} - ${formatRegularShiftTime(end)}`;
 }
 
 function basicSelectClass(value) {
@@ -375,6 +468,9 @@ function inferShuttleVariantResult(value, context = {}) {
   if (!value) return null;
   const fixedVariant = fixedShuttleVariant(value);
   if (fixedVariant) return { variant: fixedVariant, confidence: 1, scores: { ...scores, [fixedVariant]: 10 }, reasons: [`explicit ${fixedVariant} label`] };
+  if (isQuarterPastShuttleCrewShift(value)) {
+    return { variant: 'Crew', confidence: 1, scores: { ...scores, Crew: 10 }, reasons: ['custom shuttle shift starts at :15'] };
+  }
   const startMinutes = shiftStartMinutes(value);
   const window = shiftWindowMinutes(value);
   if (!window) return null;
@@ -530,13 +626,13 @@ function resolveShuttleVariantsForDate(dateKey) {
     let chosenVariant = null;
     rankedVariants.forEach(([variant, score]) => {
       if (chosenVariant || score <= 0) return;
-      if (!assignedVariants.has(variant)) {
+      if (variant === 'Crew' || !assignedVariants.has(variant)) {
         chosenVariant = variant;
       }
     });
     if (!chosenVariant && result) chosenVariant = result.variant;
     resolved.set(sel, chosenVariant);
-    if (chosenVariant) assignedVariants.add(chosenVariant);
+    if (chosenVariant && chosenVariant !== 'Crew') assignedVariants.add(chosenVariant);
   });
 
   return resolved;
@@ -900,13 +996,21 @@ function wireShiftSelects() {
       const previousValue = sel.dataset.prevValue || 'Set';
       let value = sel.value;
       if (sel.dataset.allowCustom === '1' && value === CUSTOM_SHIFT_VALUE) {
-        const custom = window.prompt('Enter the time window (e.g., 5:30am - 1:30pm)');
+        const custom = window.prompt('Enter the time window (e.g., 5:30am - 1:30pm or 1730 - 0130)');
         if (!custom || !custom.trim()) {
           sel.value = previousValue;
           applySuggestionOptionState(sel, 'selected');
           return;
         }
-        const cleaned = custom.trim();
+        const cleaned = section === 'Shuttle'
+          ? normalizeCustomShiftTimeRange(custom)
+          : custom.trim();
+        if (!cleaned) {
+          sel.value = previousValue;
+          applySuggestionOptionState(sel, 'selected');
+          showToast('Enter a valid time range');
+          return;
+        }
         let existing = Array.from(sel.options).find(opt => opt.value === cleaned);
         if (!existing) {
           existing = document.createElement('option');
@@ -2422,6 +2526,7 @@ window.confirmGenerateSchedule = confirmGenerateSchedule;
 
 document.addEventListener('DOMContentLoaded', () => {
   initThemeToggle();
+  initUpdatesModal();
   wireShiftSelects();
   initShuttleSuggestions();
   wireTimeOff();

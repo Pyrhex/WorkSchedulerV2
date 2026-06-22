@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import math
 import mimetypes
@@ -22,6 +23,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, stream_with_context, url_for
 from dotenv import load_dotenv
+from markupsafe import escape
+import markdown
 import requests
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select, update, delete
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -37,13 +40,14 @@ load_dotenv()
 
 app = Flask(__name__)
 
-ASSET_VERSION = os.getenv("ASSET_VERSION", "20260318")
+ASSET_VERSION = os.getenv("ASSET_VERSION", "20260621")
 app.jinja_env.globals["ASSET_VERSION"] = ASSET_VERSION
 
 BASE_DIR = Path(app.root_path)
 SCHEDULE_TEMPLATE_FILENAME = BASE_DIR / "ScheduleTemplate.xlsx"
 SCHEDULE_TEMPLATE_ARCHIVE_DIR = BASE_DIR / "old_schedule_templates"
 SCHEDULE_TEMPLATE_ALLOWED_SUFFIXES = {".xlsx"}
+RECENT_UPDATES_FILENAME = BASE_DIR / "RECENT_UPDATES.md"
 
 
 DISCORD_IMAGE_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -182,10 +186,26 @@ def inject_database_switcher() -> dict[str, Any]:
         }
         for value, meta in DATABASE_CHOICES.items()
     ]
+    updates_markdown = ""
+    try:
+        updates_markdown = RECENT_UPDATES_FILENAME.read_text(encoding="utf-8").strip()
+    except OSError:
+        app.logger.warning("Unable to read recent updates from %s", RECENT_UPDATES_FILENAME)
+
+    # Escape raw HTML before Markdown conversion. The file can use normal Markdown,
+    # while an accidental HTML tag cannot inject markup into every page.
+    recent_updates_html = markdown.markdown(
+        str(escape(updates_markdown)),
+        extensions=["sane_lists"],
+    ) if updates_markdown else ""
+    recent_updates_version = hashlib.sha256(updates_markdown.encode("utf-8")).hexdigest()[:16]
+
     return {
         "database_options": options,
         "active_database_choice": current_choice,
         "active_database_label": _database_label(current_choice),
+        "recent_updates_html": recent_updates_html,
+        "recent_updates_version": recent_updates_version,
     }
 
 
@@ -613,6 +633,10 @@ EXCEL_EPOCH = date(1899, 12, 30)
 MAX_AIRCREW_IMPORT_WARNINGS = 20
 AIRCREW_TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?", re.IGNORECASE)
 CUSTOM_SHIFT_TIME_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])", re.IGNORECASE)
+CUSTOM_SHIFT_RANGE_PATTERN = re.compile(
+    r"^\s*(.+?)\s*(?:-|–|—|\bto\b)\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
 CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45
 SHUTTLE_INFERENCE_NEARBY_ARRIVAL_BUFFER_MINUTES = 90
 
@@ -632,6 +656,45 @@ class ShuttleInferenceResult:
         )
         reason_bits = "; ".join(self.reasons[:4]) if self.reasons else "no strong signals"
         return f"variant={self.variant or 'None'} confidence={self.confidence:.2f} scores[{score_bits}] reasons[{reason_bits}]"
+
+
+def _parse_custom_shift_time_token(token: str) -> Optional[tuple[int, int]]:
+    normalized = re.sub(r"\s+", "", str(token or "").lower())
+    regular = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?(am|pm)", normalized)
+    if regular:
+        hour = int(regular.group(1))
+        minute = int(regular.group(2) or "0")
+        if not 1 <= hour <= 12 or minute > 59:
+            return None
+        return ((hour % 12) + (12 if regular.group(3) == "pm" else 0), minute)
+
+    military = re.fullmatch(r"(?:(\d{1,2}):(\d{2})|(\d{3,4}))", normalized)
+    if not military:
+        return None
+    compact = military.group(3)
+    hour = int(compact[:-2]) if compact else int(military.group(1))
+    minute = int(compact[-2:]) if compact else int(military.group(2))
+    if minute > 59 or hour > 24 or (hour == 24 and minute != 0):
+        return None
+    return (0 if hour == 24 else hour, minute)
+
+
+def _format_regular_shift_time(time_value: tuple[int, int]) -> str:
+    hour24, minute = time_value
+    period = "pm" if hour24 >= 12 else "am"
+    hour = (hour24 % 12) or 12
+    return f"{hour}:{minute:02d}{period}"
+
+
+def _normalize_custom_shift_time_range(value: str) -> Optional[str]:
+    match = CUSTOM_SHIFT_RANGE_PATTERN.fullmatch(str(value or ""))
+    if not match:
+        return None
+    start = _parse_custom_shift_time_token(match.group(1))
+    end = _parse_custom_shift_time_token(match.group(2))
+    if start is None or end is None:
+        return None
+    return f"{_format_regular_shift_time(start)} - {_format_regular_shift_time(end)}"
 
 
 def _clean_header_value(value: Any) -> str:
@@ -2062,6 +2125,14 @@ def _is_training_shift_label(label: Optional[str]) -> bool:
     return bool(re.search(r"\(\s*T\s*\)\s*$", (label or "").strip(), re.IGNORECASE))
 
 
+def _is_quarter_past_shuttle_crew_shift(label: Optional[str]) -> bool:
+    """Custom shuttle shifts starting at :15 are crew shifts."""
+    if not _is_custom_time_range_label(label) or _is_training_shift_label(label):
+        return False
+    start_minutes = _shift_start_minutes(label)
+    return start_minutes is not None and start_minutes % 60 == 15
+
+
 def _window_overlap_minutes(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
     return max(0, min(a_end, b_end) - max(a_start, b_start))
 
@@ -2217,9 +2288,9 @@ def _fixed_shuttle_variant(value: Optional[str]) -> Optional[str]:
 def _reserved_shuttle_variants(value: Optional[str]) -> set[str]:
     normalized = (value or "").strip()
     if normalized == SHUTTLE_COMBO_LABEL:
-        return {"Midday", "Crew"}
+        return {"Midday"}
     fixed = _fixed_shuttle_variant(normalized)
-    return {fixed} if fixed else set()
+    return {fixed} if fixed and fixed != "Crew" else set()
 
 
 def _minutes_until_window(start: int, end: int, point: int) -> int:
@@ -2305,6 +2376,14 @@ def _shuttle_variant_score_result(
         fixed_scores = {"AM": 0.0, "Midday": 0.0, "PM": 0.0, "Crew": 0.0}
         fixed_scores[fixed_variant] = 10.0
         return ShuttleInferenceResult(fixed_variant, 1.0, fixed_scores, [f"explicit {fixed_variant} label"])
+    if _is_quarter_past_shuttle_crew_shift(value):
+        crew_scores = {"AM": 0.0, "Midday": 0.0, "PM": 0.0, "Crew": 10.0}
+        return ShuttleInferenceResult(
+            "Crew",
+            1.0,
+            crew_scores,
+            ["custom shuttle shift starts at :15"],
+        )
     start, end = _shift_window_minutes(value)
     if start is None or end is None:
         return ShuttleInferenceResult(None, 0.0, default_scores, ["no recognizable time window"])
@@ -2455,13 +2534,13 @@ def _resolve_shuttle_variants_for_values(
         for variant, score in ranked_variants:
             if score <= 0:
                 continue
-            if variant not in assigned_variants:
+            if variant == "Crew" or variant not in assigned_variants:
                 chosen_variant = variant
                 break
         if not chosen_variant:
             chosen_variant = result.variant
         resolved[idx] = chosen_variant
-        if chosen_variant:
+        if chosen_variant and chosen_variant != "Crew":
             assigned_variants.add(chosen_variant)
 
     return resolved
@@ -3374,6 +3453,11 @@ def assign():
     date_key = data.get("date")
     value = data.get("value")
     week_id = data.get("week_id")  # Get week_id from request
+
+    if section == "Shuttle" and isinstance(value, str):
+        normalized_custom_time = _normalize_custom_shift_time_range(value)
+        if normalized_custom_time is not None:
+            value = normalized_custom_time
 
     final_value = value or "Set"
     with SessionLocal() as s:
