@@ -225,8 +225,9 @@ def inject_database_switcher() -> dict[str, Any]:
         "database_options": options,
         "active_database_choice": current_choice,
         "active_database_label": _database_label(current_choice),
-        "openai_rule_interpreter_available": bool(_openai_rule_api_key()),
+        "openai_rule_interpreter_available": _openai_rule_interpreter_configured(),
         "openai_rule_interpreter_model": _openai_rule_model(),
+        "openai_rule_interpreter_via_proxy": _openai_base_url() != "https://api.openai.com/v1",
         "recent_updates_html": recent_updates_html,
         "recent_updates_version": recent_updates_version,
     }
@@ -4780,6 +4781,7 @@ def _new_ai_prompt_rules() -> dict[str, Any]:
         "blocked_shifts": set(),
         "preferred": Counter(),
         "preference_pairs": [],
+        "start_before_pairs": [],
         "preferred_days": Counter(),
         "preferred_shifts": Counter(),
         "max_shifts": {},
@@ -4838,6 +4840,39 @@ def _parse_ai_schedule_instructions(instructions: str, employees: list[Employee]
                 rules["applied"].append(line)
                 continue
 
+        # Relative stagger rule, e.g. "Abdi should start before Emilyn".
+        # This affects their start-time ordering only; it does not globally
+        # prioritize either employee over the rest of the team.
+        start_before_match = re.search(
+            r"\b(.+?)\s+(?:should\s+)?start\s+(?:earlier than|before)\s+(.+?)(?:[.!?]|$)",
+            lowered,
+        )
+        if start_before_match:
+            before_names = [name for name in matched_names if name in start_before_match.group(1)]
+            after_names = [name for name in matched_names if name in start_before_match.group(2)]
+            if before_names and after_names:
+                before_ids = {
+                    employee_id
+                    for name in before_names
+                    for employee_id in employees_by_name[name]
+                }
+                after_ids = {
+                    employee_id
+                    for name in after_names
+                    for employee_id in employees_by_name[name]
+                }
+                day_indexes = {
+                    day_index
+                    for day_name, day_index in weekdays.items()
+                    if re.search(rf"\b{day_name}\b", lowered)
+                }
+                shift_keys = _ai_instruction_shift_keys(lowered)
+                rules["start_before_pairs"].append(
+                    (before_ids, after_ids, day_indexes, shift_keys)
+                )
+                rules["applied"].append(line)
+                continue
+
         employee_ids = [employee_id for name in matched_names for employee_id in employees_by_name[name]]
         day_indexes = {
             day_index
@@ -4891,6 +4926,24 @@ def _parse_ai_schedule_instructions(instructions: str, employees: list[Employee]
 
 def _openai_rule_api_key() -> str:
     return (os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _openai_base_url() -> str:
+    configured = (
+        os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE_URL")
+        or "https://api.openai.com/v1"
+    ).strip()
+    return configured.rstrip("/")
+
+
+def _openai_responses_url() -> str:
+    base_url = _openai_base_url()
+    return base_url if base_url.endswith("/responses") else f"{base_url}/responses"
+
+
+def _openai_rule_interpreter_configured() -> bool:
+    return bool(_openai_rule_api_key()) or _openai_base_url() != "https://api.openai.com/v1"
 
 
 def _openai_rule_model() -> str:
@@ -4950,6 +5003,9 @@ def _model_rules_to_scheduler_rules(model_result: dict[str, Any], employees: lis
         if rule_type == "prefer_over" and other_ids:
             rules["preference_pairs"].append((employee_ids, other_ids))
             applied = True
+        elif rule_type == "start_before" and other_ids:
+            rules["start_before_pairs"].append((employee_ids, other_ids, days, shift_keys))
+            applied = True
         elif rule_type == "prefer":
             for employee_id in employee_ids:
                 rules["preferred"][employee_id] += 350
@@ -4996,7 +5052,7 @@ def _interpret_ai_schedule_instructions(
     if not raw:
         return _new_ai_prompt_rules(), "none", "No typed rules."
     api_key = _openai_rule_api_key()
-    if not api_key:
+    if not _openai_rule_interpreter_configured():
         fallback = _parse_ai_schedule_instructions(raw, employees)
         return fallback, "local_fallback", "OpenAI API key is not configured; used the limited local parser."
 
@@ -5020,7 +5076,7 @@ def _interpret_ai_schedule_instructions(
                         "type": {
                             "type": "string",
                             "enum": [
-                                "prefer_over", "prefer", "avoid", "prefer_shift",
+                                "prefer_over", "start_before", "prefer", "avoid", "prefer_shift",
                                 "avoid_shift", "prefer_day", "avoid_day", "max_shifts",
                             ],
                         },
@@ -5058,12 +5114,12 @@ def _interpret_ai_schedule_instructions(
         "manager_request": raw,
     }
     try:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            _openai_responses_url(),
+            headers=headers,
             json={
                 "model": _openai_rule_model(),
                 "store": False,
@@ -5071,6 +5127,9 @@ def _interpret_ai_schedule_instructions(
                     "Convert a hotel manager's natural-language scheduling request into structured rules. "
                     "Resolve pronouns and comparisons from context. Use only exact employee names supplied. "
                     "A phrase like 'prefer A over B' is pairwise, not a global priority for A. "
+                    "Represent 'A should start before B' or 'A should start earlier than B' as start_before, "
+                    "with A in employees and B in other_employees. This is a relative stagger-time rule, "
+                    "not a global priority. Leave days and shift empty when the manager did not specify them. "
                     "Do not invent time off or availability. Return no rule for requests that cannot be represented."
                 ),
                 "input": json.dumps(context),
@@ -5341,10 +5400,55 @@ def ai_generate_week_schedule(week_id: int, instructions: str = "") -> dict[str,
             for preferred_ids, other_ids in prompt_rules["preference_pairs"]:
                 if employee_id in other_ids and preferred_ids.intersection(candidate_pool):
                     pair_priority -= 1
+
+            # Typed relative-start rules outrank history while remaining
+            # pairwise. They only affect employees sharing this day's role and
+            # shift token, so "Abdi before Emilyn" does not raise Abdi above
+            # every other employee or move either person to another shift.
+            start_order_priority = 0
+            candidate_start = _shift_start_minutes(label)
+            for before_ids, after_ids, rule_days, rule_shift_keys in prompt_rules["start_before_pairs"]:
+                if rule_days and day.weekday() not in rule_days:
+                    continue
+                if rule_shift_keys and not any(
+                    _ai_shift_matches_instruction(label, token, shift_key)
+                    for shift_key in rule_shift_keys
+                ):
+                    continue
+
+                before_candidates = before_ids.intersection(candidate_pool)
+                after_candidates = after_ids.intersection(candidate_pool)
+                if employee_id in before_ids and after_candidates:
+                    start_order_priority += 2
+                elif employee_id in after_ids and before_candidates:
+                    start_order_priority -= 2
+
+                if candidate_start is None:
+                    continue
+                other_ids = after_ids if employee_id in before_ids else before_ids if employee_id in after_ids else set()
+                for other_id in other_ids:
+                    other_assignment = assignments.get((other_id, day))
+                    if not other_assignment or (other_assignment.value or "Set") == "Set":
+                        continue
+                    other_role, other_token = _ai_history_role_token(
+                        employee_by_id[other_id], other_assignment.value, section_names
+                    )
+                    if other_role != role or other_token != token:
+                        continue
+                    other_start = _shift_start_minutes(other_assignment.value)
+                    if other_start is None:
+                        continue
+                    correctly_ordered = (
+                        candidate_start < other_start
+                        if employee_id in before_ids
+                        else other_start < candidate_start
+                    )
+                    start_order_priority += 2 if correctly_ordered else -2
             fallback_score = learned + (5 if preferred_match else 0) + (2 if under_preferred else 0) - assigned_counts[employee_id] * 2
             return (
                 prompt_score,
                 pair_priority,
+                start_order_priority,
                 fallback_score,
                 -assigned_counts[employee_id],
                 info["seniority"],

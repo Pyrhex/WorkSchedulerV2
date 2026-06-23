@@ -83,7 +83,7 @@
         <div class="ai-generator-actions">
           <span>
             {% if openai_rule_interpreter_available %}
-              Natural-language interpretation enabled ({{ openai_rule_interpreter_model }}).
+              Natural-language interpretation enabled ({{ openai_rule_interpreter_model }}{% if openai_rule_interpreter_via_proxy %} via CLIProxy{% endif %}).
             {% else %}
               Limited parser active—add OPENAI_API_KEY to enable full natural-language understanding.
             {% endif %}
