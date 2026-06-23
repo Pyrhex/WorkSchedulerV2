@@ -1962,6 +1962,18 @@ function wireGenerateSchedule() {
   });
 }
 
+function wireAiGenerateSchedule() {
+  const form = document.getElementById('ai-generate-form');
+  if (!form) return;
+  form.addEventListener('submit', (event) => {
+    const confirmed = confirm(
+      'AI Generate will fill open dropdowns for this week using schedule patterns from 2026 onward. ' +
+      'Every dropdown already set to a value other than "-" will remain unchanged. Continue?'
+    );
+    if (!confirmed) event.preventDefault();
+  });
+}
+
 function confirmGenerateSchedule() {
   return confirm(
     'This will generate a new schedule for the current week. ' +
@@ -2533,6 +2545,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initLiveUpdates();
   wireWeekNav();
   wireGenerateSchedule();
+  wireAiGenerateSchedule();
   wireEmployeeSorting();
   wireEmployeeRoleChanges();
   wireEmployeeSecondaryRoles();

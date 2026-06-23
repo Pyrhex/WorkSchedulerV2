@@ -29,8 +29,9 @@
   <body>
     {% set db_switched = request.args.get('db_switched') %}
     {% set db_switched_label = 'Production' if db_switched == 'production' else 'Development' if db_switched == 'development' else '' %}
+    {% set db_synced = request.args.get('db_synced') %}
     {% set db_switch_error = request.args.get('db_switch_error') %}
-    {% set db_switch_error_message = 'Database password is not configured in .env.' if db_switch_error == 'password_not_configured' else 'Incorrect database password.' if db_switch_error == 'invalid_password' else '' %}
+    {% set db_switch_error_message = 'Database password is not configured in .env.' if db_switch_error == 'password_not_configured' else 'Incorrect database password.' if db_switch_error == 'invalid_password' else 'Test database could not be synchronized from production. The database was not switched.' if db_switch_error == 'sync_failed' else '' %}
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand"><a href="/" style="color:inherit;text-decoration:none;">Scheduling System</a></div>
@@ -66,7 +67,7 @@
 
     <main class="content">
       {% if db_switched_label %}
-        <section class="database-switcher-status" id="database-switcher-status" aria-label="Database switch status">Switched to {{ db_switched_label }}.</section>
+        <section class="database-switcher-status" id="database-switcher-status" aria-label="Database switch status">{% if db_synced == 'production' %}Production data copied to Development. {% endif %}Switched to {{ db_switched_label }}.</section>
       {% endif %}
       {% if db_switch_error_message %}
         <section class="database-switcher-status database-switcher-status-error" id="database-switcher-status" aria-label="Database switch error">{{ db_switch_error_message }}</section>
