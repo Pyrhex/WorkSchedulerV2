@@ -335,6 +335,9 @@ class Employee(Base):
     sort_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Employees are archived instead of hard-deleted so their historical
+    # assignments can still be rendered on past schedules.
+    is_active: Mapped[bool] = mapped_column("active", Boolean, nullable=False, default=True)
 
 
 class EmployeeRole(Base):
@@ -444,7 +447,7 @@ def employee_by_role(session: Session, *, name: str, role: str) -> Optional[Empl
     stmt = (
         select(Employee)
         .join(Section)
-        .where(Employee.name == name)
+        .where(Employee.name == name, Employee.is_active.is_(True))
     )
     if role:
         stmt = stmt.where(Section.name == role)
@@ -1171,7 +1174,7 @@ def ensure_employee_sort_orders(session: Session, section_ids: Optional[Iterable
         employees = list(
             session.scalars(
                 select(Employee)
-                .where(Employee.section_id == sec.id)
+                .where(Employee.section_id == sec.id, Employee.is_active.is_(True))
                 .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.id)
             )
         )
@@ -1202,6 +1205,10 @@ def init_db_once():
                     conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN max_shifts_per_week INTEGER")
                 if "sort_order" not in cols:
                     conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN sort_order INTEGER")
+                if "active" not in cols:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE employees ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
+                    )
                 # Create aircrew arrivals table if missing
                 conn.exec_driver_sql(
                     """
@@ -1320,7 +1327,7 @@ def init_db_once():
 
         # Ensure assignments exist for every employee/date
         day_list = daterange(wk.start_date, 7)
-        for emp in s.scalars(select(Employee)):
+        for emp in s.scalars(select(Employee).where(Employee.is_active.is_(True))):
             for d in day_list:
                 exists = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == emp.id, Assignment.date == d))
                 if not exists:
@@ -1409,7 +1416,7 @@ def sync_timeoff_to_assignments(week_id: int, s: Session):
     wk = s.get(Week, week_id)
     days = list(daterange(wk.start_date, 7))
     # For each employee and day, if approved time off, set TIME OFF label
-    for emp in s.scalars(select(Employee)):
+    for emp in s.scalars(select(Employee).where(Employee.is_active.is_(True))):
         sec = s.get(Section, emp.section_id)
         role_name = sec.name if sec else ""
         for d in days:
@@ -1435,10 +1442,10 @@ def sync_timeoff_to_assignments(week_id: int, s: Session):
 
 def seed_example_assignments_db(week_id: int, s: Session):
     # Breakfast Bar, Front Desk, Shuttle examples
-    bb_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Breakfast Bar"))]
-    fd_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Front Desk"))]
-    sh_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Shuttle"))]
-    maint_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Maintenance"))]
+    bb_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Breakfast Bar", Employee.is_active.is_(True)))]
+    fd_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Front Desk", Employee.is_active.is_(True)))]
+    sh_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Shuttle", Employee.is_active.is_(True)))]
+    maint_emp_ids = [e.id for e in s.scalars(select(Employee).join(Section).where(Section.name == "Maintenance", Employee.is_active.is_(True)))]
     wk = s.get(Week, week_id)
     section_names = {sec.id: sec.name for sec in s.scalars(select(Section))}
     for d in daterange(wk.start_date, 7):
@@ -1746,6 +1753,18 @@ def build_week_context(week_id: int):
         }
         sec_by_id = {sec.id: sec.name for sec in section_objs}
 
+        # Active employees always get a row. Archived employees only get a row
+        # on weeks where they actually worked, preserving historical schedules
+        # without leaking former staff into current or future schedules.
+        historically_scheduled_ids = set(
+            s.scalars(
+                select(Assignment.employee_id).where(
+                    Assignment.week_id == week_id,
+                    Assignment.value.notin_(NEUTRAL_ASSIGNMENT_VALUES),
+                )
+            )
+        )
+
         emp_primary_section: dict[int, str] = {}
         emp_sections_map: dict[int, set[str]] = {}
 
@@ -1783,7 +1802,13 @@ def build_week_context(week_id: int):
             primary_emps = list(
                 s.scalars(
                     select(Employee)
-                    .where(Employee.section_id == sec_obj.id)
+                    .where(
+                        Employee.section_id == sec_obj.id,
+                        (
+                            Employee.is_active.is_(True)
+                            | Employee.id.in_(historically_scheduled_ids)
+                        ),
+                    )
                     .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
                 )
             )
@@ -2943,7 +2968,7 @@ def list_employees():
             employees[sec.name] = list(
                 s.scalars(
                     select(Employee)
-                    .where(Employee.section_id == sec.id)
+                    .where(Employee.section_id == sec.id, Employee.is_active.is_(True))
                     .order_by(Employee.sort_order, Employee.name)
                 )
             )
@@ -2985,13 +3010,18 @@ def reorder_employees():
         if not section:
             return jsonify({"ok": False, "error": "Section not found"}), 404
         db_ids = set(
-            s.scalars(select(Employee.id).where(Employee.section_id == section_id))
+            s.scalars(
+                select(Employee.id).where(
+                    Employee.section_id == section_id,
+                    Employee.is_active.is_(True),
+                )
+            )
         )
         if len(employee_ids) != len(db_ids) or set(employee_ids) != db_ids:
             return jsonify({"ok": False, "error": "Employees mismatch"}), 400
         for sort_index, eid in enumerate(employee_ids):
             emp = s.get(Employee, eid)
-            if not emp or emp.section_id != section_id:
+            if not emp or not emp.is_active or emp.section_id != section_id:
                 continue
             emp.sort_order = sort_index
         ensure_employee_sort_orders(s, [section_id])
@@ -3008,7 +3038,7 @@ def employee_roles_for(s: Session, eid: int) -> list[Section]:
 def manage_employee_roles(eid: int):
     with SessionLocal() as s:
         emp = s.get(Employee, eid)
-        if not emp:
+        if not emp or not emp.is_active:
             return redirect(url_for('list_employees'))
         all_sections = list(s.scalars(select(Section)))
         primary_section_id = emp.section_id
@@ -3074,7 +3104,7 @@ def change_employee_role(eid: int):
         section_id = None
     with SessionLocal() as s:
         emp = s.get(Employee, eid)
-        if not emp:
+        if not emp or not emp.is_active:
             if is_json:
                 return jsonify({"ok": False, "error": "Employee not found"}), 404
             return redirect(url_for('list_employees'))
@@ -3114,7 +3144,7 @@ def update_employee(eid: int):
     seniority = int(seniority_raw) if seniority_raw.isdigit() else None
     with SessionLocal() as s:
         emp = s.get(Employee, eid)
-        if not emp:
+        if not emp or not emp.is_active:
             return redirect(url_for('list_employees'))
         # Role change
         if role:
@@ -3143,19 +3173,27 @@ def update_employee(eid: int):
 def delete_employee(eid: int):
     with SessionLocal() as s:
         emp = s.get(Employee, eid)
-        if not emp:
+        if not emp or not emp.is_active:
             return redirect(url_for('list_employees'))
         section_id = emp.section_id
-        # Delete assignments for this employee
-        s.query(Assignment).filter(Assignment.employee_id == emp.id).delete()
-        # Delete availability
+
+        # Archive instead of deleting. Past worked shifts remain tied to this
+        # employee, while today and future assignments are cleared so a former
+        # employee cannot remain on an upcoming schedule.
+        emp.is_active = False
+        future_values = {"value": "Set"}
+        if hasattr(Assignment, "dismissed_timeoff"):
+            future_values["dismissed_timeoff"] = 0
+        s.execute(
+            update(Assignment)
+            .where(Assignment.employee_id == emp.id, Assignment.date >= date.today())
+            .values(**future_values)
+        )
+
+        # Availability is operational data and is no longer needed once the
+        # employee is archived. Roles and time-off history are retained because
+        # they provide context for old schedules.
         s.query(EmployeeAvailability).filter(EmployeeAvailability.employee_id == emp.id).delete()
-        # Delete time off entries matching this name (name-based linkage)
-        section = s.get(Section, emp.section_id)
-        role_name = section.name if section else ""
-        s.query(TimeOff).filter(TimeOff.name == emp.name, TimeOff.role == role_name).delete()
-        # Delete employee
-        s.delete(emp)
         ensure_employee_sort_orders(s, [section_id])
         s.commit()
     return redirect(url_for('list_employees'))
@@ -3203,7 +3241,7 @@ def employee_availability(eid: int):
     ]
     with SessionLocal() as s:
         emp = s.get(Employee, eid)
-        if not emp:
+        if not emp or not emp.is_active:
             return redirect(url_for('list_employees'))
         # Allow switching role context via query param for multi-role availability
         allowed_sections = [s.get(Section, emp.section_id)] + employee_roles_for(s, eid)
@@ -3265,7 +3303,7 @@ def timeoff_page():
             same_day = t.from_date == t.to_date
             label = t.from_date.strftime("%b %d") if same_day else f"{t.from_date.strftime('%b %d')} to {t.to_date.strftime('%b %d')}"
             items.append({"id": t.id, "name": t.name, "role": t.role, "label": label, "approved": t.approved, "vacation": bool(getattr(t, "vacation", False))})
-        employees = list(s.scalars(select(Employee)))
+        employees = list(s.scalars(select(Employee).where(Employee.is_active.is_(True))))
         sections = list(s.scalars(select(Section)))
     return render_template("timeoff.html", time_off=items, employees=employees, sections=sections)
 
@@ -3274,7 +3312,7 @@ def timeoff_page():
 def timeoff_new():
     if request.method == 'GET':
         with SessionLocal() as s:
-            employees = list(s.scalars(select(Employee)))
+            employees = list(s.scalars(select(Employee).where(Employee.is_active.is_(True))))
             sections = list(s.scalars(select(Section)))
         return render_template("timeoff_new.html", employees=employees, sections=sections)
     # POST
@@ -3286,7 +3324,7 @@ def timeoff_new():
     vacation = bool(request.form.get('vacation'))
     if not name or not selected_role or not from_s or not to_s:
         with SessionLocal() as s:
-            employees = list(s.scalars(select(Employee)))
+            employees = list(s.scalars(select(Employee).where(Employee.is_active.is_(True))))
             sections = list(s.scalars(select(Section)))
         return render_template("timeoff_new.html", employees=employees, sections=sections, error="All fields are required"), 400
     try:
@@ -3295,19 +3333,19 @@ def timeoff_new():
         from_d, to_d = date(fy, fm, fd), date(ty, tm, td)
     except Exception:
         with SessionLocal() as s:
-            employees = list(s.scalars(select(Employee)))
+            employees = list(s.scalars(select(Employee).where(Employee.is_active.is_(True))))
             sections = list(s.scalars(select(Section)))
         return render_template("timeoff_new.html", employees=employees, sections=sections, error="Invalid dates"), 400
     if to_d < from_d:
         with SessionLocal() as s:
-            employees = list(s.scalars(select(Employee)))
+            employees = list(s.scalars(select(Employee).where(Employee.is_active.is_(True))))
             sections = list(s.scalars(select(Section)))
         return render_template("timeoff_new.html", employees=employees, sections=sections, error="End date must be after start date"), 400
     timeoff_info = None
     with SessionLocal() as s:
         emp = employee_by_role(s, name=name, role=selected_role)
         if not emp:
-            employees = list(s.scalars(select(Employee)))
+            employees = list(s.scalars(select(Employee).where(Employee.is_active.is_(True))))
             sections = list(s.scalars(select(Section)))
             return render_template(
                 "timeoff_new.html",
@@ -4493,9 +4531,9 @@ def toggle_timeoff_vacation():
 def generate_new_schedule_db(week_id: int):
     """Legacy: generate a single week (kept for reference)."""
     with SessionLocal() as s:
-        fd_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Front Desk")))
-        bb_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Breakfast Bar")))
-        sh_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Shuttle")))
+        fd_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Front Desk", Employee.is_active.is_(True))))
+        bb_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Breakfast Bar", Employee.is_active.is_(True))))
+        sh_emp_ids = list(s.scalars(select(Employee.id).join(Section).where(Section.name == "Shuttle", Employee.is_active.is_(True))))
         wk = s.get(Week, week_id)
         section_names = {sec.id: sec.name for sec in s.scalars(select(Section))}
 
@@ -4687,7 +4725,7 @@ def _apply_template_payload_to_week(payload: dict, week: Week, session: Session)
             continue
         target_date = week.start_date + timedelta(days=day_offset)
         employee = session.get(Employee, employee_id)
-        if not employee:
+        if not employee or not employee.is_active:
             continue
         assignment = session.scalar(
             select(Assignment).where(
@@ -4722,7 +4760,7 @@ def _ensure_week_and_assignments(s: Session, start_d: date) -> Week:
         s.add(wk)
         s.flush()
     # Ensure assignments exist for all employees/days
-    for emp in s.scalars(select(Employee)):
+    for emp in s.scalars(select(Employee).where(Employee.is_active.is_(True))):
         for d in daterange(start_d, 7):
             exists = s.scalar(select(Assignment).where(Assignment.week_id == wk.id, Assignment.employee_id == emp.id, Assignment.date == d))
             if not exists:
@@ -4858,7 +4896,7 @@ def generate_4_week_schedule(start_week_id: int):
         avail_idx = _build_availability_index(s)
         emp_info: dict[int, dict] = {}
         emp_name: dict[int, str] = {}
-        for e in s.scalars(select(Employee)):
+        for e in s.scalars(select(Employee).where(Employee.is_active.is_(True))):
             sec = s.get(Section, e.section_id)
             emp_info[e.id] = {
                 "role": (sec.name if sec else ""),
@@ -4877,7 +4915,7 @@ def generate_4_week_schedule(start_week_id: int):
             primary_emps = list(
                 s.scalars(
                     select(Employee)
-                    .where(Employee.section_id == sec.id)
+                    .where(Employee.section_id == sec.id, Employee.is_active.is_(True))
                     .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
                 )
             )
@@ -4886,7 +4924,7 @@ def generate_4_week_schedule(start_week_id: int):
                 list(
                     s.scalars(
                         select(Employee)
-                        .where(Employee.id.in_(secondary_ids))
+                        .where(Employee.id.in_(secondary_ids), Employee.is_active.is_(True))
                         .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
                     )
                 )
@@ -5382,7 +5420,7 @@ def prev_week(week_id: int):
             s.flush()
             
             # Create assignments for all employees for the new week
-            for emp in s.scalars(select(Employee)):
+            for emp in s.scalars(select(Employee).where(Employee.is_active.is_(True))):
                 for d in daterange(prev_start_date, 7):
                     s.add(Assignment(week_id=prev_week.id, employee_id=emp.id, date=d, value="Set"))
             s.commit()
@@ -5412,7 +5450,7 @@ def next_week(week_id: int):
             s.flush()
             
             # Create assignments for all employees for the new week
-            for emp in s.scalars(select(Employee)):
+            for emp in s.scalars(select(Employee).where(Employee.is_active.is_(True))):
                 for d in daterange(next_start_date, 7):
                     s.add(Assignment(week_id=next_week.id, employee_id=emp.id, date=d, value="Set"))
             s.commit()
