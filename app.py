@@ -40,7 +40,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-ASSET_VERSION = os.getenv("ASSET_VERSION", "20260621")
+ASSET_VERSION = os.getenv("ASSET_VERSION", "20260623f")
 app.jinja_env.globals["ASSET_VERSION"] = ASSET_VERSION
 
 BASE_DIR = Path(app.root_path)
@@ -335,6 +335,9 @@ class Employee(Base):
     sort_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Temporary employees are scheduled normally in the app, but their Excel
+    # export slot is intentionally left blank.
+    temporary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class EmployeeRole(Base):
@@ -514,6 +517,7 @@ OFF_LABEL = "OFF"
 NA_LABEL = "N/A"
 SHUTTLE_COMBO_LABEL = "10:30am - 6:30pm (c)"
 SHUTTLE_PM_LABEL = "PM (5:30PM–1:30AM)"
+SHUTTLE_DAY_CREW_LABEL = "Crew (10:00AM–6:00PM)"
 SUGGESTED_CREW_REGEX = re.compile(r"^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$", re.IGNORECASE)
 TIME_OFF_VALUES = {TIME_OFF_LABEL, REQ_VAC_LABEL}
 NEUTRAL_ASSIGNMENT_VALUES = {"Set", OFF_LABEL, NA_LABEL} | TIME_OFF_VALUES
@@ -575,6 +579,7 @@ FRONT_DESK_SHIFTS = [
 ]
 
 SHUTTLE_CREW_SHIFTS = [
+    SHUTTLE_DAY_CREW_LABEL,
     "Crew (5:45PM–1:45AM)",
     "Crew (8:00PM–12:00AM)",
     "Crew (9:00PM–1:00AM)",
@@ -588,12 +593,14 @@ SHUTTLE_SHIFTS = [
     TIME_OFF_LABEL,
     REQ_VAC_LABEL,
     "AM (3:30AM–11:30AM)",
+    SHUTTLE_DAY_CREW_LABEL,
     "Midday (10:30AM–6:30PM)",
     SHUTTLE_COMBO_LABEL,
     SHUTTLE_PM_LABEL,
-] + SHUTTLE_CREW_SHIFTS
+    *SHUTTLE_CREW_SHIFTS[1:],
+]
 
-DEFAULT_CREW_SHIFT = SHUTTLE_CREW_SHIFTS[0]
+DEFAULT_CREW_SHIFT = "Crew (5:45PM–1:45AM)"
 CREW_EXCEL_FILL = PatternFill(start_color="FFFFB347", end_color="FFFFB347", fill_type="solid")
 
 MAINTENANCE_SHIFTS = [
@@ -1202,6 +1209,8 @@ def init_db_once():
                     conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN max_shifts_per_week INTEGER")
                 if "sort_order" not in cols:
                     conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN sort_order INTEGER")
+                if "temporary" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE employees ADD COLUMN temporary INTEGER NOT NULL DEFAULT 0")
                 # Create aircrew arrivals table if missing
                 conn.exec_driver_sql(
                     """
@@ -1825,6 +1834,12 @@ def build_week_context(week_id: int):
                 arrivals[carrier][key] = _deserialize_aircrew_times(row.times)
 
         shuttle_suggestions: dict[str, str] = {}
+        shuttle_resolved_variants: dict[str, dict[str, Optional[str]]] = {}
+        shuttle_section = sections.get("Shuttle") or {}
+        shuttle_employees = list(shuttle_section.get("employees") or [])
+        shuttle_assignments = shuttle_section.get("assignments") or {}
+        for employee_name in shuttle_employees:
+            shuttle_resolved_variants[employee_name] = {}
         for d in dates:
             key = d["key"]
             all_minutes: list[int] = []
@@ -1838,6 +1853,16 @@ def build_week_context(week_id: int):
             suggestion = _suggest_shuttle_shift(all_minutes)
             if suggestion:
                 shuttle_suggestions[key] = suggestion
+            shuttle_values = [
+                (shuttle_assignments.get(employee_name) or {}).get(key)
+                for employee_name in shuttle_employees
+            ]
+            resolved_for_date = _resolve_shuttle_variants_for_values(
+                shuttle_values,
+                aircrew_arrival_minutes=all_minutes,
+            )
+            for employee_name, resolved_variant in zip(shuttle_employees, resolved_for_date):
+                shuttle_resolved_variants[employee_name][key] = resolved_variant
 
         occupancy_rows = list(s.scalars(select(OccupancySnapshot).where(OccupancySnapshot.week_id == week_id)))
         occupancy_values = {d["key"]: None for d in dates}
@@ -1924,6 +1949,7 @@ def build_week_context(week_id: int):
                 "arrivals": arrivals,
             },
             "shuttle_suggestions": shuttle_suggestions,
+            "shuttle_resolved_variants": shuttle_resolved_variants,
             "occupancy": {
                 "values": occupancy_values,
                 "last_uploaded_at": last_uploaded_occupancy_label,
@@ -2017,6 +2043,7 @@ def index():
         aircrew=ctx.get("aircrew", {}),
         occupancy=ctx.get("occupancy", {}),
         shuttle_suggestions=ctx.get("shuttle_suggestions", {}),
+        shuttle_resolved_variants=ctx.get("shuttle_resolved_variants", {}),
         counts=counts,
         missing=missing,
         required=required,
@@ -2108,6 +2135,12 @@ def _shift_window_minutes(label: Optional[str]) -> tuple[Optional[int], Optional
     if end <= start:
         end += 24 * 60
     return (start, end)
+
+
+def _matches_shuttle_day_crew_window(label: Optional[str]) -> bool:
+    """Return true for any time range that runs exactly from 10am to 6pm."""
+    start, end = _shift_window_minutes(label)
+    return start == (10 * 60) and end == (18 * 60)
 
 
 def _is_custom_time_range_label(label: Optional[str]) -> bool:
@@ -2274,6 +2307,8 @@ def _fixed_shuttle_variant(value: Optional[str]) -> Optional[str]:
         return None
     if normalized == SHUTTLE_COMBO_LABEL:
         return "Midday"
+    if _matches_shuttle_day_crew_window(normalized):
+        return "Crew"
     if normalized == "AM (3:30AM–11:30AM)":
         return "AM"
     if normalized.startswith("Midday"):
@@ -2696,6 +2731,7 @@ def view_week(week_id: int):
         aircrew=ctx.get("aircrew", {}),
         occupancy=ctx.get("occupancy", {}),
         shuttle_suggestions=ctx.get("shuttle_suggestions", {}),
+        shuttle_resolved_variants=ctx.get("shuttle_resolved_variants", {}),
         counts=counts,
         missing=missing,
         required=required,
@@ -2902,6 +2938,7 @@ def admin_add_employee():
         preferred_shifts_per_week = int(pref_count_raw) if pref_count_raw.isdigit() else None
         max_shifts_per_week = int(max_count_raw) if max_count_raw.isdigit() else None
         availability = (request.form.get("availability") or "").strip() or None
+        temporary = bool(request.form.get("temporary"))
         sort_order = next_sort_order_for_section(s, sec.id)
         emp = Employee(
             name=full_name,
@@ -2914,6 +2951,7 @@ def admin_add_employee():
             sort_order=sort_order,
             first_name=first_name,
             last_name=last_name or None,
+            temporary=temporary,
         )
         s.add(emp)
         s.flush()
@@ -3180,11 +3218,7 @@ def role_availability_variants(role_name: str) -> list[str]:
     if role_name == "Front Desk":
         return ["AM", "PM", "Audit"]
     if role_name == "Shuttle":
-        return [
-            "AM (3:30AM–11:30AM)",
-            "Midday (10:30AM–6:30PM)",
-            SHUTTLE_PM_LABEL,
-        ] + SHUTTLE_CREW_SHIFTS + [SHUTTLE_COMBO_LABEL]
+        return [shift for shift in SHUTTLE_SHIFTS if shift not in NEUTRAL_ASSIGNMENT_VALUES]
     if role_name == "Maintenance":
         return ["8AM–4:30PM"]
     return []
@@ -3225,6 +3259,7 @@ def employee_availability(eid: int):
             max_count_raw = (request.form.get("max_shifts_per_week") or "").strip()
             emp.preferred_shifts_per_week = int(pref_count_raw) if pref_count_raw.isdigit() else None
             emp.max_shifts_per_week = int(max_count_raw) if max_count_raw.isdigit() else None
+            emp.temporary = bool(request.form.get("temporary"))
             # Save availability: clear and re-add
             # NOTE: We don't clear all availability across roles; only rebuild for the role being edited.
             s.query(EmployeeAvailability).filter(
@@ -5514,8 +5549,18 @@ def export_schedule_excel(week_id: int):
         sections = ctx["week"]["sections"]
         occupancy_values = (ctx.get("occupancy") or {}).get("values") or {}
         aircrew_ctx = ctx.get("aircrew") or {}
-        carriers = aircrew_ctx.get("carriers") or []
+        shuttle_resolved_variants = ctx.get("shuttle_resolved_variants") or {}
+        configured_carriers = aircrew_ctx.get("carriers") or []
         carrier_arrivals = aircrew_ctx.get("arrivals") or {}
+        week_date_keys = {date_info["key"] for date_info in dates}
+        carriers = [
+            carrier
+            for carrier in configured_carriers
+            if any(
+                (carrier_arrivals.get(carrier) or {}).get(date_key) or []
+                for date_key in week_date_keys
+            )
+        ]
         shuttle_pm_anchor_dates: set[str] = set()
         shuttle_section = sections.get("Shuttle") or {}
         for employee_assignments in (shuttle_section.get("assignments") or {}).values():
@@ -5891,10 +5936,24 @@ def export_schedule_excel(week_id: int):
                 if last_employee_row and last_employee_row >= insert_at:
                     other_block["last_employee_row"] = last_employee_row + 1
 
-        def _ensure_employee_row(section_name: str, employee_key: str, display_name: str) -> Optional[int]:
+        def _clear_employee_export_row(row_num: int) -> None:
+            """Reserve an employee slot while keeping its visible export cells blank."""
+            for col_idx in range(4, 12):  # Employee name (D) through Wednesday (K)
+                ws.cell(row=row_num, column=col_idx).value = None
+
+        def _ensure_employee_row(
+            section_name: str,
+            employee_key: str,
+            display_name: str,
+            *,
+            blank_row: bool = False,
+        ) -> Optional[int]:
             existing = employee_rows.get((employee_key, section_name))
             if existing and existing["section"] == section_name:
-                return existing["row"]
+                row_num = existing["row"]
+                if blank_row:
+                    _clear_employee_export_row(row_num)
+                return row_num
 
             block = section_blocks.get(section_name)
             if not block:
@@ -5922,7 +5981,10 @@ def export_schedule_excel(week_id: int):
                     block["end_row"] = row_num
                 _refresh_section_merge(section_name)
 
-            ws[f'D{row_num}'] = display_name.upper()
+            if blank_row:
+                _clear_employee_export_row(row_num)
+            else:
+                ws[f'D{row_num}'] = display_name.upper()
             block["template_row"] = block.get("template_row") or row_num
             block["last_employee_row"] = max(block.get("last_employee_row") or 0, row_num)
             employee_rows[(employee_key, section_name)] = {"row": row_num, "section": section_name}
@@ -5995,10 +6057,13 @@ def export_schedule_excel(week_id: int):
 
         # Build map of employee -> primary section name (for cross-role tagging)
         emp_primary: dict[str, str] = {}
+        temporary_employee_rows: set[tuple[str, str]] = set()
         for e in s.scalars(select(Employee)):
             sec = s.get(Section, e.section_id)
             if sec:
                 emp_primary[e.name.upper()] = sec.name
+                if e.temporary:
+                    temporary_employee_rows.add((e.name.upper(), sec.name))
 
         # Helpers to classify a raw assignment label into a section
         def shift_section_of(value: Optional[str]) -> Optional[str]:
@@ -6020,6 +6085,7 @@ def export_schedule_excel(week_id: int):
             value: Optional[str],
             section_name: Optional[str] = None,
             date_key: Optional[str] = None,
+            employee_name: Optional[str] = None,
         ) -> bool:
             if section_name != "Shuttle":
                 return False
@@ -6027,6 +6093,12 @@ def export_schedule_excel(week_id: int):
                 return False
             if value == SHUTTLE_COMBO_LABEL:
                 return True
+            if employee_name and date_key:
+                resolved_variant = (
+                    shuttle_resolved_variants.get(employee_name, {}).get(date_key)
+                )
+                if resolved_variant is not None:
+                    return resolved_variant == "Crew"
             return _infer_shuttle_variant(value) == "Crew"
 
         # Fill in the shift data
@@ -6064,8 +6136,16 @@ def export_schedule_excel(week_id: int):
             
             for employee_name, employee_assignments in assignments.items():
                 employee_key = employee_name.upper()
-                row_num = _ensure_employee_row(section_name, employee_key, employee_name)
+                is_temporary = (employee_key, section_name) in temporary_employee_rows
+                row_num = _ensure_employee_row(
+                    section_name,
+                    employee_key,
+                    employee_name,
+                    blank_row=is_temporary,
+                )
                 if not row_num:
+                    continue
+                if is_temporary:
                     continue
 
                 # Fill in the shifts for each day (columns E-K)
@@ -6116,24 +6196,42 @@ def export_schedule_excel(week_id: int):
 
                     # Set the cell value and apply crew fill when needed
                     cell.value = shift_display
-                    if _is_crew_shift_label(shift_value, section_name, date_key):
+                    if _is_crew_shift_label(
+                        shift_value,
+                        section_name,
+                        date_key,
+                        employee_name,
+                    ):
                         cell.fill = CREW_EXCEL_FILL
 
         occupancy_row: Optional[int] = None
         crew_row_map: dict[str, int] = {}
-        carrier_label_map = {carrier: _normalize_label_cell(carrier) for carrier in carriers}
+        active_carriers = set(carriers)
+        carrier_label_map = {
+            carrier: _normalize_label_cell(carrier) for carrier in configured_carriers
+        }
         for row in range(1, ws.max_row + 1):
-            normalized = _normalize_label_cell(ws[f'D{row}'].value)
+            raw_label = ws[f'D{row}'].value
+            normalized = _normalize_label_cell(raw_label)
             if not normalized:
                 continue
             if normalized in {"OCC", "OCCUPANCY"} and occupancy_row is None:
                 occupancy_row = row
                 continue
+            if not isinstance(raw_label, str) or not raw_label.strip().startswith("**"):
+                continue
             for carrier, carrier_norm in carrier_label_map.items():
                 if not carrier_norm:
                     continue
                 if normalized == carrier_norm or carrier_norm.startswith(normalized) or normalized.startswith(carrier_norm):
-                    crew_row_map.setdefault(carrier, row)
+                    if carrier in active_carriers:
+                        crew_row_map.setdefault(carrier, row)
+                    else:
+                        # The template may contain a pre-defined row for this
+                        # airline. Keep its formatting available for future
+                        # weeks, but remove it from this week's export.
+                        _clear_employee_export_row(row)
+                        ws.row_dimensions[row].hidden = True
                     break
 
         crew_row_map = _ensure_aircrew_carrier_rows(crew_row_map)
@@ -6163,11 +6261,16 @@ def export_schedule_excel(week_id: int):
                     ordered_times = _sort_aircrew_times(times)
                     formatted_times = " / ".join(_format_aircrew_time_display(t) for t in ordered_times)
                     cell.value = formatted_times
+                    has_many_pickups = len(ordered_times) >= 4
+                    if has_many_pickups:
+                        compact_font = copy_style(cell.font)
+                        compact_font.sz = 11
+                        cell.font = compact_font
                     existing_alignment = cell.alignment or Alignment()
                     cell.alignment = Alignment(
                         horizontal=existing_alignment.horizontal or "left",
                         vertical=existing_alignment.vertical or "top",
-                        wrap_text=False,
+                        wrap_text=has_many_pickups,
                     )
         
         # Save to BytesIO

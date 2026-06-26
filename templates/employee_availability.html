@@ -78,6 +78,13 @@
             <div class="field-label">Max Shifts / Week</div>
             <input class="field-input compact" type="number" min="0" step="1" name="max_shifts_per_week" value="{{ employee.max_shifts_per_week or '' }}" />
           </label>
+          <label style="display:flex;align-items:flex-start;gap:10px;">
+            <input type="checkbox" name="temporary" value="1" {% if employee.temporary %}checked{% endif %} style="margin-top:3px;" />
+            <span>
+              <span class="field-label">Temporary employee</span>
+              <span class="field-help">Their Excel export row will be left blank.</span>
+            </span>
+          </label>
         </div>
       </div>
 

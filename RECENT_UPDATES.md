@@ -1,3 +1,9 @@
+# June 23rd, 2026
+- Added a dropdown option for 10am - 6pm for crew
+- Moved Airline Crew Arrival times closer to Shuttle Crew Section
+- Fixed bug involving fired employees for past schedules
+- Fixed bug with excel sheet with Airline crew arrival cells with 4 or more pickup times
+
 # June 21st, 2026
 - Times that start at the 15 minute mark for shuttle drivers are considered crew shifts
 

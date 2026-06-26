@@ -640,6 +640,14 @@ body.modal-open { overflow: hidden; }
 .shift-select.select-gold  { background: #0ea5e9; border-color: transparent; color: #ffffff; }
 .shift-select.select-purple{ background: #7c3aed; border-color: #6d28d9; color: #ffffff; }
 .shift-select.select-orange{ background: #f97316; border-color: #ea580c; color: #ffffff; }
+
+/* The date-level shuttle resolver is authoritative when a raw shift window
+   resembles one variant but is assigned to another for coverage. */
+.schedule-table[aria-label="Shuttle"] .cell[data-resolved-variant="Crew"] .shift-select {
+  background: #b91c1c;
+  border-color: #991b1b;
+  color: #ffffff;
+}
 .aircrew-cell {
   position: relative;
   min-height: 48px;

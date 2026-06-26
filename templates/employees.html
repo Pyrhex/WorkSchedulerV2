@@ -28,6 +28,7 @@
                       <th style="padding:8px;">Name</th>
                       <th style="padding:8px;">Role</th>
                       <th style="padding:8px;">Secondary Roles</th>
+                      <th style="padding:8px;">Temporary</th>
                       <th style="padding:8px; width: 320px;">Actions</th>
                     </tr>
                   </thead>
@@ -66,6 +67,7 @@
                             {% endfor %}
                           </select>
                         </td>
+                        <td style="padding:8px; color:#475569;">{{ 'Yes' if p.temporary else 'No' }}</td>
                         <td style="padding:8px;">
                           <form method="get" action="/admin/employees/{{ p.id }}/availability" style="display:inline-block; vertical-align: top;">
                             <button class="btn" type="submit">Availability</button>

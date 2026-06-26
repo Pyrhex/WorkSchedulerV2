@@ -223,9 +223,20 @@
                 {% set options = shuttle.employee_shifts.get(emp, shuttle.shifts) %}
                 {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
                 {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls = val | shuttle_shift_class %}
+                {% set resolved_variant = shuttle_resolved_variants.get(emp, {}).get(d.key) %}
+                {% if resolved_variant == 'AM' %}
+                  {% set sel_cls = 'select-green' %}
+                {% elif resolved_variant == 'Midday' %}
+                  {% set sel_cls = 'select-blue' %}
+                {% elif resolved_variant == 'PM' %}
+                  {% set sel_cls = 'select-purple' %}
+                {% elif resolved_variant == 'Crew' %}
+                  {% set sel_cls = 'select-red' %}
+                {% else %}
+                  {% set sel_cls = val | shuttle_shift_class %}
+                {% endif %}
                 {% set suggestion = shuttle_suggestions.get(d.key) %}
-                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}">
+                <div class="cell" role="cell" data-section="Shuttle" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}" data-suggestion="{{ suggestion or '' }}" data-resolved-variant="{{ resolved_variant or '' }}">
                   <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
                     {% for opt in options %}
                       {% if opt == 'TIME OFF' %}
@@ -247,52 +258,6 @@
                       <option value="{{ suggestion }}" data-suggestion="1" data-suggestion-text="{{ suggestion }}" data-suggestion-label="{{ suggestion }} (Suggested)" {% if suggestion == val %}selected{% endif %}>
                         {{ suggestion }} (Suggested)
                       </option>
-                    {% endif %}
-                  </select>
-                </div>
-              {% endfor %}
-            </div>
-          {% endfor %}
-        </div>
-      </div>
-
-      <div class="table-card">
-        <div class="table-title breakfast-title">
-          <span>Breakfast Bar</span>
-          <span class="breakfast-warning-note" id="breakfast-order-warning"{% if not bb_order_warning_active %} hidden{% endif %}>Merve cannot be scheduled earlier than Eurielle.</span>
-        </div>
-        <div class="schedule-table" role="table" aria-label="Breakfast Bar">
-          <div class="row header" role="row">
-            <div class="cell head sticky" role="columnheader">Employees</div>
-            {% for d in week.dates %}
-              <div class="cell head {% if bb_missing[d.key] %}missing{% elif bb_order_warnings[d.key] %}order-warning{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
-            {% endfor %}
-          </div>
-          {% for emp in breakfast.employees %}
-            {% set emp_id = breakfast.employee_ids.get(emp) %}
-            <div class="row" role="row">
-              <div class="cell sticky" role="rowheader">{{ emp }}</div>
-              {% for d in week.dates %}
-                {% set val = breakfast.assignments[emp][d.key] %}
-                {% set options = breakfast.employee_shifts.get(emp, breakfast.shifts) %}
-                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
-                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
-                {% set sel_cls = val | shift_class %}
-                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
-                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
-                    {% for opt in options %}
-                      {% if opt == 'TIME OFF' %}
-                        {% set req_label = ('REQ VAC ' ~ d.label_md) if (vac and dismissed) else ('REQ OFF ' ~ d.label_md) %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
-                      {% elif opt == 'REQ VAC' %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC {{ d.label_md }}</option>
-                      {% else %}
-                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
-                      {% endif %}
-                    {% endfor %}
-                    <option value="__custom__">Custom time…</option>
-                    {% if val and (val not in options) %}
-                      <option value="{{ val }}" data-custom="1" selected>{{ val | format_shift }}</option>
                     {% endif %}
                   </select>
                 </div>
@@ -345,6 +310,7 @@
           {% endfor %}
         </div>
       </div>
+
       <div class="aircrew-time-modal" id="aircrew-time-modal" aria-hidden="true">
         <div class="aircrew-time-overlay" aria-hidden="true"></div>
         <div class="aircrew-time-dialog" role="dialog" aria-modal="true" aria-labelledby="aircrew-time-title">
@@ -387,6 +353,52 @@
         </div>
       </div>
       {% endif %}
+
+      <div class="table-card">
+        <div class="table-title breakfast-title">
+          <span>Breakfast Bar</span>
+          <span class="breakfast-warning-note" id="breakfast-order-warning"{% if not bb_order_warning_active %} hidden{% endif %}>Merve cannot be scheduled earlier than Eurielle.</span>
+        </div>
+        <div class="schedule-table" role="table" aria-label="Breakfast Bar">
+          <div class="row header" role="row">
+            <div class="cell head sticky" role="columnheader">Employees</div>
+            {% for d in week.dates %}
+              <div class="cell head {% if bb_missing[d.key] %}missing{% elif bb_order_warnings[d.key] %}order-warning{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+            {% endfor %}
+          </div>
+          {% for emp in breakfast.employees %}
+            {% set emp_id = breakfast.employee_ids.get(emp) %}
+            <div class="row" role="row">
+              <div class="cell sticky" role="rowheader">{{ emp }}</div>
+              {% for d in week.dates %}
+                {% set val = breakfast.assignments[emp][d.key] %}
+                {% set options = breakfast.employee_shifts.get(emp, breakfast.shifts) %}
+                {% set vac = (vacation_days.get(emp) and (d.key in vacation_days.get(emp))) %}
+                {% set dismissed = (dismissed_days.get(emp) and (d.key in dismissed_days.get(emp))) %}
+                {% set sel_cls = val | shift_class %}
+                <div class="cell" role="cell" data-section="Breakfast Bar" data-employee="{{ emp }}" data-employee-id="{{ emp_id or '' }}" data-date="{{ d.key }}">
+                  <select class="shift-select {{ sel_cls }} center small" aria-label="{{ emp }} {{ d.label_long }}" data-allow-custom="1">
+                    {% for opt in options %}
+                      {% if opt == 'TIME OFF' %}
+                        {% set req_label = ('REQ VAC ' ~ d.label_md) if (vac and dismissed) else ('REQ OFF ' ~ d.label_md) %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ req_label }}</option>
+                      {% elif opt == 'REQ VAC' %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>REQ VAC {{ d.label_md }}</option>
+                      {% else %}
+                        <option value="{{ opt }}" {% if opt == val %}selected{% endif %}>{{ opt | format_shift }}</option>
+                      {% endif %}
+                    {% endfor %}
+                    <option value="__custom__">Custom time…</option>
+                    {% if val and (val not in options) %}
+                      <option value="{{ val }}" data-custom="1" selected>{{ val | format_shift }}</option>
+                    {% endif %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
 
       {% if maintenance %}
       <div class="table-card">

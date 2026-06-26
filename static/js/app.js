@@ -3,6 +3,7 @@ const CUSTOM_OFF_VALUE = 'OFF';
 const CUSTOM_NA_VALUE = 'N/A';
 const SHUTTLE_COMBO_LABEL = '10:30am - 6:30pm (c)';
 const SHUTTLE_PM_LABEL = 'PM (5:30PM–1:30AM)';
+const SHUTTLE_DAY_CREW_LABEL = 'Crew (10:00AM–6:00PM)';
 const CREW_SUGGESTION_REGEX = /^\s*\d{1,2}:\d{2}(?:am|pm)\s*-\s*\d{1,2}:\d{2}(?:am|pm)\s*$/i;
 const SHIFT_TIME_REGEX_GLOBAL = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)/ig;
 const CREW_SHIFT_CUTOFF_MINUTES = (17 * 60) + 45;
@@ -19,6 +20,7 @@ const CANONICAL_SHIFT_LABELS = [
   'Audit (10:00PM–6:00AM)',
   'Audit (10:15PM–6:15AM)',
   'AM (3:30AM–11:30AM)',
+  SHUTTLE_DAY_CREW_LABEL,
   'Midday (10:30AM–6:30PM)',
   SHUTTLE_PM_LABEL,
   'Crew (5:45PM–1:45AM)',
@@ -300,6 +302,8 @@ function fixedShuttleVariant(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   if (!normalized || normalized === 'Set' || normalized === CUSTOM_OFF_VALUE || normalized === CUSTOM_NA_VALUE || TIME_OFF_VALUES.has(normalized)) return null;
   if (normalized === SHUTTLE_COMBO_LABEL) return 'Midday';
+  const normalizedWindow = shiftWindowMinutes(normalized);
+  if (normalizedWindow && normalizedWindow[0] === 10 * 60 && normalizedWindow[1] === 18 * 60) return 'Crew';
   if (normalized === 'AM (3:30AM–11:30AM)') return 'AM';
   if (normalized.startsWith('Midday')) return 'Midday';
   if (normalized.startsWith('PM (5:30PM')) return 'PM';
@@ -689,6 +693,7 @@ function updateSelectClass(selectEl, section, value) {
     const dateKey = cell.getAttribute('data-date');
     const resolved = dateKey ? resolveShuttleVariantsForDate(dateKey) : new Map();
     const variant = resolved.get(selectEl);
+    cell.dataset.resolvedVariant = variant || '';
     if (variant === 'AM') cls = 'select-green';
     else if (variant === 'Midday') cls = 'select-blue';
     else if (variant === 'PM') cls = 'select-purple';
@@ -712,7 +717,28 @@ function initSelectColors() {
   document.querySelectorAll('.shift-select').forEach(sel => {
     const cell = sel.closest('.cell');
     const section = cell ? cell.getAttribute('data-section') : '';
-    updateSelectClass(sel, section, sel.value);
+    const serverResolvedVariant = section === 'Shuttle' && cell
+      ? (cell.dataset.resolvedVariant || '')
+      : '';
+    if (serverResolvedVariant) {
+      const serverClass = {
+        AM: 'select-green',
+        Midday: 'select-blue',
+        PM: 'select-purple',
+        Crew: 'select-red',
+      }[serverResolvedVariant];
+      if (serverClass) {
+        sel.classList.remove(
+          'select-green',
+          'select-blue',
+          'select-purple',
+          'select-red',
+        );
+        sel.classList.add(serverClass);
+      }
+    } else {
+      updateSelectClass(sel, section, sel.value);
+    }
     applyTimeOffLabelsToSelect(sel);
   });
 }
@@ -1399,7 +1425,10 @@ function applyAircrewCells(carrier, cells) {
     renderAircrewCell(cell, Array.isArray(times) ? times : []);
     updatedDates.add(dateKey);
   });
-  updatedDates.forEach(updateShuttleSuggestionForDate);
+  updatedDates.forEach(dateKey => {
+    updateShuttleSuggestionForDate(dateKey);
+    updateShuttleDateSelectClasses(dateKey);
+  });
 }
 
 function renderOccupancyCell(cell, value) {
@@ -1867,6 +1896,7 @@ function initLiveUpdates() {
             renderAircrewCell(cell, times);
           }
           updateShuttleSuggestionForDate(item.date);
+          updateShuttleDateSelectClasses(item.date);
         });
       } else if (payload?.type === 'occupancy') {
         if (payload.week_id && window.currentWeekId && Number(payload.week_id) !== Number(window.currentWeekId)) {

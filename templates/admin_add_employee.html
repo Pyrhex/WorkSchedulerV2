@@ -50,6 +50,13 @@
               <div class="field-label">Availability (optional)</div>
               <input class="field-input" name="availability" placeholder="e.g., Mon-Fri 6a-2p; Sat Sun off" />
             </label>
+            <label style="display:flex;align-items:flex-start;gap:10px;">
+              <input type="checkbox" name="temporary" value="1" style="margin-top:3px;" />
+              <span>
+                <span class="field-label">Temporary employee</span>
+                <span class="field-help">Keep this employee on the web schedule, but leave their row blank on Excel exports.</span>
+              </span>
+            </label>
             <div class="form-actions">
               <button class="btn primary" type="submit">Add Employee</button>
               <a class="btn ghost" href="/">Cancel</a>
