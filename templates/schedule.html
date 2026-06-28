@@ -14,6 +14,9 @@
         <form action="{% if meta.week_id %}/export/excel/{{ meta.week_id }}{% else %}/export/excel/1{% endif %}" method="get" target="_blank" style="display:inline-block;">
           <button class="btn secondary" type="submit">Export to Excel</button>
         </form>
+        <form action="{% if meta.week_id %}/export/shuttle-aircrew/{{ meta.week_id }}{% else %}/export/shuttle-aircrew/1{% endif %}" method="get" target="_blank" style="display:inline-block;">
+          <button class="btn secondary" type="submit">Export Shuttle/Air Crew</button>
+        </form>
         <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/manager-meals{% else %}/week/1/manager-meals{% endif %}" method="get" style="display:inline-block;">
           <button class="btn purple" type="submit">Manager Meal List</button>
         </form>

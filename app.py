@@ -33,6 +33,8 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
+from openpyxl.worksheet.cell_range import MultiCellRange
+from openpyxl.worksheet.merge import MergedCellRange
 
 
 load_dotenv()
@@ -45,6 +47,7 @@ app.jinja_env.globals["ASSET_VERSION"] = ASSET_VERSION
 
 BASE_DIR = Path(app.root_path)
 SCHEDULE_TEMPLATE_FILENAME = BASE_DIR / "ScheduleTemplate.xlsx"
+SHUTTLE_TEMPLATE_FILENAME = BASE_DIR / "ShuttleTemplateEmptySingle.xlsx"
 SCHEDULE_TEMPLATE_ARCHIVE_DIR = BASE_DIR / "old_schedule_templates"
 SCHEDULE_TEMPLATE_ALLOWED_SUFFIXES = {".xlsx"}
 RECENT_UPDATES_FILENAME = BASE_DIR / "RECENT_UPDATES.md"
@@ -5530,6 +5533,305 @@ def download_schedule_template():
     )
 
 
+@app.route("/export/shuttle-aircrew/<int:week_id>")
+def export_shuttle_aircrew_excel(week_id: int):
+    """Export one week of shuttle/aircrew schedule."""
+    if not SHUTTLE_TEMPLATE_FILENAME.exists():
+        return jsonify({"error": "ShuttleTemplateEmptySingle.xlsx not found"}), 404
+
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return jsonify({"error": "Week not found"}), 404
+
+        week_start = week.start_date
+        temporary_shuttle_names = {
+            e.name.upper()
+            for e in s.scalars(
+                select(Employee)
+                .join(Section)
+                .where(Section.name == "Shuttle", Employee.temporary.is_(True))
+            )
+        }
+
+    contexts = [build_week_context(week_id)]
+
+    wb = load_workbook(SHUTTLE_TEMPLATE_FILENAME)
+    ws = wb.active
+
+    def safe_sheet_title(title: str) -> str:
+        invalid = set('[]:*?/\\')
+        cleaned = ''.join(ch for ch in title if ch not in invalid)
+        return cleaned[:31]
+
+    def month_abbrev(d: date) -> str:
+        abbr = d.strftime("%b")
+        return "Sept" if d.month == 9 and abbr == "Sep" else abbr
+
+    def _shift_merged_ranges_for_insert(insert_at: int) -> None:
+        merged_refs = [str(rng) for rng in ws.merged_cells.ranges]
+        if not merged_refs:
+            return
+
+        updated_refs: list[str] = []
+        for old_ref in merged_refs:
+            min_col, min_row, max_col, max_row = range_boundaries(old_ref)
+            if max_row < insert_at:
+                new_ref = old_ref
+            elif min_row >= insert_at:
+                new_ref = (
+                    f"{get_column_letter(min_col)}{min_row + 1}:"
+                    f"{get_column_letter(max_col)}{max_row + 1}"
+                )
+            else:
+                new_ref = (
+                    f"{get_column_letter(min_col)}{min_row}:"
+                    f"{get_column_letter(max_col)}{max_row + 1}"
+                )
+            updated_refs.append(new_ref)
+
+        ws.merged_cells = MultiCellRange(
+            {MergedCellRange(ws, ref) for ref in updated_refs}
+        )
+
+    def _clone_row_style(src_row: int, dest_row: int) -> None:
+        for col_idx in range(1, min(ws.max_column, 11) + 1):
+            src_cell = ws.cell(row=src_row, column=col_idx)
+            dest_cell = ws.cell(row=dest_row, column=col_idx)
+            if isinstance(src_cell, MergedCell) or isinstance(dest_cell, MergedCell):
+                continue
+            dest_cell.value = None
+            if src_cell.has_style:
+                dest_cell.font = copy_style(src_cell.font)
+                dest_cell.border = copy_style(src_cell.border)
+                dest_cell.fill = copy_style(src_cell.fill)
+                dest_cell.number_format = src_cell.number_format
+                dest_cell.alignment = copy_style(src_cell.alignment)
+                dest_cell.protection = copy_style(src_cell.protection)
+        if ws.row_dimensions[src_row].height:
+            ws.row_dimensions[dest_row].height = ws.row_dimensions[src_row].height
+
+    def _row_heights_from(insert_at: int) -> tuple[int, dict[int, Optional[float]]]:
+        return ws.max_row, {
+            row_num: row_dimension.height
+            for row_num, row_dimension in ws.row_dimensions.items()
+            if row_num >= insert_at
+        }
+
+    def _apply_row_height_insert_shift(
+        insert_at: int,
+        old_max_row: int,
+        existing_heights: dict[int, Optional[float]],
+    ) -> None:
+        for row_num in range(old_max_row + 1, insert_at, -1):
+            ws.row_dimensions[row_num].height = existing_heights.get(row_num - 1)
+        ws.row_dimensions[insert_at].height = existing_heights.get(insert_at)
+
+    def _refresh_block_merge(block: dict[str, Any]) -> None:
+        old_ref = block["merge_ref"]
+        new_ref = f"A{block['start_row']}:C{block['end_row']}"
+        merged_refs = [
+            new_ref if str(rng) == old_ref else str(rng)
+            for rng in ws.merged_cells.ranges
+        ]
+        ws.merged_cells = MultiCellRange(
+            {MergedCellRange(ws, ref) for ref in merged_refs}
+        )
+        ws.cell(block["start_row"], 1).value = block["label"]
+        block["merge_ref"] = new_ref
+
+    def _section_blocks(label: str) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for merged_range in sorted(ws.merged_cells.ranges, key=lambda rng: rng.min_row):
+            if merged_range.min_col != 1 or merged_range.max_col != 3:
+                continue
+            cell_value = ws.cell(merged_range.min_row, 1).value
+            if isinstance(cell_value, str) and cell_value.strip().lower() == label.lower():
+                blocks.append({
+                    "start_row": merged_range.min_row,
+                    "end_row": merged_range.max_row,
+                    "merge_ref": str(merged_range),
+                    "label": cell_value,
+                })
+        return blocks
+
+    def _expand_block(block: dict[str, Any], required_data_rows: int) -> None:
+        data_rows = max(0, int(required_data_rows or 0))
+        capacity = block["end_row"] - block["start_row"] + 1
+        while capacity < data_rows:
+            insert_at = block["end_row"] + 1
+            reference_row = block["end_row"]
+            old_max_row, existing_heights = _row_heights_from(insert_at)
+            ws.insert_rows(insert_at)
+            _apply_row_height_insert_shift(insert_at, old_max_row, existing_heights)
+            _shift_merged_ranges_for_insert(insert_at)
+            _clone_row_style(reference_row, insert_at)
+            ws.row_dimensions[insert_at].height = ws.row_dimensions[reference_row].height
+            block["end_row"] += 1
+            _refresh_block_merge(block)
+            capacity += 1
+
+    def _active_aircrew_carriers(ctxs: list[dict[str, Any]]) -> list[str]:
+        found: set[str] = set()
+        for ctx in ctxs:
+            dates = ctx["week"]["dates"]
+            date_keys = {d["key"] for d in dates}
+            aircrew_ctx = ctx.get("aircrew") or {}
+            arrivals = aircrew_ctx.get("arrivals") or {}
+            for carrier in aircrew_ctx.get("carriers") or []:
+                carrier_map = arrivals.get(carrier) or {}
+                if any(carrier_map.get(date_key) for date_key in date_keys):
+                    found.add(carrier)
+        return sorted(found)
+
+    def _shuttle_shift_display(value: Optional[str], date_label_md: str = "") -> str:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "-"
+        if isinstance(value, str) and value.strip() == "-":
+            return "-"
+        if value in TIME_OFF_VALUES:
+            suffix = f" {date_label_md}" if date_label_md else ""
+            return f"{'REQ VAC' if value == REQ_VAC_LABEL else 'REQ OFF'}{suffix}"
+        if value in NEUTRAL_ASSIGNMENT_VALUES:
+            return "-"
+        original = str(value)
+        display = original
+        parenthetical_time = _parenthetical_time_text(display)
+        if parenthetical_time:
+            display = parenthetical_time
+        display = re.sub(r"\s*–\s*", " – ", display)
+        display = re.sub(r"\s*-\s*", " - ", display)
+        display = re.sub(r"AM|PM", lambda m: m.group(0).lower(), display)
+        display = _strip_leading_zero_from_display_times(display)
+        if original.strip().lower() == SHUTTLE_COMBO_LABEL.lower():
+            return "10:30am - 6:30pm (c)"
+        return _compact_evening_crew_display(display)
+
+    def _is_crew_shift(
+        value: Optional[str],
+        ctx: dict[str, Any],
+        date_key: str,
+        employee_name: str,
+    ) -> bool:
+        if not value or value in NEUTRAL_ASSIGNMENT_VALUES:
+            return False
+        if value == SHUTTLE_COMBO_LABEL:
+            return True
+        resolved = (
+            (ctx.get("shuttle_resolved_variants") or {})
+            .get(employee_name, {})
+            .get(date_key)
+        )
+        if resolved is not None:
+            return resolved == "Crew"
+        return _infer_shuttle_variant(value) == "Crew"
+
+    active_carriers = _active_aircrew_carriers(contexts)
+    max_shuttle_rows = max(
+        len(((ctx["week"]["sections"].get("Shuttle") or {}).get("employees") or []))
+        for ctx in contexts
+    )
+    max_aircrew_rows = len(active_carriers)
+
+    # Grow lower blocks first so row insertions do not move blocks we already handled.
+    shuttle_blocks = _section_blocks("Shuttle Drivers")
+    aircrew_blocks = _section_blocks("Airline Crew")
+    for block in reversed(aircrew_blocks[:1]):
+        _expand_block(block, max_aircrew_rows)
+    for block in reversed(shuttle_blocks[:1]):
+        _expand_block(block, max_shuttle_rows)
+
+    shuttle_blocks = _section_blocks("Shuttle Drivers")
+    aircrew_blocks = _section_blocks("Airline Crew")
+    if len(shuttle_blocks) < 1 or len(aircrew_blocks) < 1:
+        return jsonify({"error": "Shuttle template is missing the required week block."}), 400
+
+    ctx = contexts[0]
+    shuttle_block = shuttle_blocks[0]
+    aircrew_block = aircrew_blocks[0]
+    dates = ctx["week"]["dates"]
+
+    date_row = shuttle_block["start_row"] - 2
+    day_row = shuttle_block["start_row"] - 1
+    for i, date_info in enumerate(dates):
+        col_idx = 5 + i
+        cell = ws.cell(date_row, col_idx)
+        cell.value = week_start + timedelta(days=i)
+        cell.number_format = "dd-mmm"
+        ws.cell(day_row, col_idx).value = (week_start + timedelta(days=i)).strftime("%a").upper()
+
+    shuttle_rows = range(shuttle_block["start_row"], shuttle_block["end_row"] + 1)
+    for row_num in shuttle_rows:
+        for col_idx in range(4, 12):
+            ws.cell(row=row_num, column=col_idx).value = None
+            if col_idx >= 5:
+                ws.cell(row=row_num, column=col_idx).fill = PatternFill(fill_type=None)
+
+    shuttle_section = ctx["week"]["sections"].get("Shuttle") or {}
+    shuttle_employees = list(shuttle_section.get("employees") or [])
+    shuttle_assignments = shuttle_section.get("assignments") or {}
+    for offset, employee_name in enumerate(shuttle_employees):
+        row_num = shuttle_block["start_row"] + offset
+        if employee_name.upper() in temporary_shuttle_names:
+            continue
+        ws.cell(row=row_num, column=4).value = employee_name.upper()
+        employee_assignments = shuttle_assignments.get(employee_name) or {}
+        for i, date_info in enumerate(dates):
+            date_key = date_info["key"]
+            value = employee_assignments.get(date_key)
+            cell = ws.cell(row=row_num, column=5 + i)
+            cell.value = _shuttle_shift_display(value, date_info.get("label_md") or "")
+            if _is_crew_shift(value, ctx, date_key, employee_name):
+                cell.fill = CREW_EXCEL_FILL
+
+    aircrew_rows = range(aircrew_block["start_row"], aircrew_block["end_row"] + 1)
+    for row_num in aircrew_rows:
+        for col_idx in range(4, 12):
+            ws.cell(row=row_num, column=col_idx).value = None
+
+    arrivals = (ctx.get("aircrew") or {}).get("arrivals") or {}
+    for offset, carrier in enumerate(active_carriers):
+        row_num = aircrew_block["start_row"] + offset
+        ws.cell(row=row_num, column=4).value = str(carrier).upper()
+        per_day = arrivals.get(carrier) or {}
+        for i, date_info in enumerate(dates):
+            cell = ws.cell(row=row_num, column=5 + i)
+            ordered_times = _sort_aircrew_times(per_day.get(date_info["key"]) or [])
+            if not ordered_times:
+                cell.value = None
+                continue
+            cell.value = " / ".join(_format_aircrew_time_display(t) for t in ordered_times)
+            has_many_pickups = len(ordered_times) >= 4
+            if has_many_pickups:
+                compact_font = copy_style(cell.font)
+                compact_font.sz = 11
+                cell.font = compact_font
+            existing_alignment = cell.alignment or Alignment()
+            cell.alignment = Alignment(
+                horizontal=existing_alignment.horizontal or "left",
+                vertical=existing_alignment.vertical or "top",
+                wrap_text=has_many_pickups,
+            )
+
+    period_end = week_start + timedelta(days=6)
+    ws.title = safe_sheet_title(f"Shuttle {week_start.strftime('%b %d')} - {period_end.strftime('%b %d')}")
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = (
+        f"Shuttle-Aircrew {month_abbrev(week_start)} {week_start.day} - "
+        f"{month_abbrev(period_end)} {period_end.day}.xlsx"
+    )
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/export/excel/<int:week_id>")
 def export_schedule_excel(week_id: int):
     """Export schedule to Excel file using the existing template"""
@@ -5915,6 +6217,22 @@ def export_schedule_excel(week_id: int):
             if src_dim and src_dim.height:
                 ws.row_dimensions[dest_row].height = src_dim.height
 
+        def _row_heights_from(insert_at: int) -> tuple[int, dict[int, Optional[float]]]:
+            return ws.max_row, {
+                row_num: row_dimension.height
+                for row_num, row_dimension in ws.row_dimensions.items()
+                if row_num >= insert_at
+            }
+
+        def _apply_row_height_insert_shift(
+            insert_at: int,
+            old_max_row: int,
+            existing_heights: dict[int, Optional[float]],
+        ) -> None:
+            for row_num in range(old_max_row + 1, insert_at, -1):
+                ws.row_dimensions[row_num].height = existing_heights.get(row_num - 1)
+            ws.row_dimensions[insert_at].height = existing_heights.get(insert_at)
+
         def _shift_tracked_rows_after_insert(insert_at: int) -> None:
             for info in employee_rows.values():
                 if info["row"] >= insert_at:
@@ -5940,6 +6258,17 @@ def export_schedule_excel(week_id: int):
             """Reserve an employee slot while keeping its visible export cells blank."""
             for col_idx in range(4, 12):  # Employee name (D) through Wednesday (K)
                 ws.cell(row=row_num, column=col_idx).value = None
+
+        def _apply_employee_row_borders(row_num: int) -> None:
+            thin_side = Side(style="thin")
+            full_border = Border(
+                left=thin_side,
+                right=thin_side,
+                top=thin_side,
+                bottom=thin_side,
+            )
+            for col_idx in range(4, 12):  # Employee name (D) through Wednesday (K)
+                ws.cell(row=row_num, column=col_idx).border = copy_style(full_border)
 
         def _ensure_employee_row(
             section_name: str,
@@ -5968,7 +6297,9 @@ def export_schedule_excel(week_id: int):
                     if helper_rows
                     else (block.get("last_employee_row") or block.get("end_row") or ws.max_row) + 1
                 )
+                old_max_row, existing_heights = _row_heights_from(insert_at)
                 ws.insert_rows(insert_at)
+                _apply_row_height_insert_shift(insert_at, old_max_row, existing_heights)
                 _shift_merged_ranges_for_insert(insert_at)
                 template_row = block.get("template_row")
                 reference_row = template_row or block.get("last_employee_row") or max(insert_at - 1, 1)
@@ -5980,6 +6311,7 @@ def export_schedule_excel(week_id: int):
                 if block.get("end_row") is None or row_num > block["end_row"]:
                     block["end_row"] = row_num
                 _refresh_section_merge(section_name)
+                _apply_employee_row_borders(row_num)
 
             if blank_row:
                 _clear_employee_export_row(row_num)
@@ -6034,7 +6366,9 @@ def export_schedule_excel(week_id: int):
                 else:
                     insert_at = (shuttle_block.get("last_employee_row") or shuttle_block.get("start_row") or ws.max_row) + 1
 
+                old_max_row, existing_heights = _row_heights_from(insert_at)
                 ws.insert_rows(insert_at)
+                _apply_row_height_insert_shift(insert_at, old_max_row, existing_heights)
                 _shift_merged_ranges_for_insert(insert_at)
                 _clone_row_style(template_row, insert_at)
                 _shift_tracked_rows_after_insert(insert_at)
@@ -6045,6 +6379,7 @@ def export_schedule_excel(week_id: int):
                 if not shuttle_end or insert_at > shuttle_end:
                     shuttle_block["end_row"] = insert_at
                 _refresh_section_merge("Shuttle")
+                _apply_employee_row_borders(insert_at)
 
                 label_cell = ws.cell(row=insert_at, column=4)
                 label_cell.value = _aircrew_export_label(carrier)
