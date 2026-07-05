@@ -456,6 +456,8 @@ body.modal-open { overflow: hidden; }
 .btn.delete-icon:focus { background: #b91c1c; }
 .btn.sm { padding: 6px 10px; font-size: 13px; }
 .btn.purple { background: var(--purple); color: #ffffff; }
+.btn.ai { background: linear-gradient(135deg, #0f766e, #2563eb); color: #ffffff; }
+.btn.ai:hover { filter: brightness(1.08); }
 .btn.discord { background: #5865f2; color: #ffffff; }
 .btn.discord:hover { background: #4752c4; }
 #discord-paste-trigger {
@@ -470,6 +472,44 @@ body.modal-open { overflow: hidden; }
 .btn.outline-success { background: transparent; border-color: var(--success); color: var(--success); }
 .btn.outline-success:hover { filter: brightness(0.95); }
 .btn:focus { outline: 2px solid #94a3b8; outline-offset: 2px; }
+.ai-undo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  background: var(--card);
+}
+.ai-undo-bar form { margin: 0; }
+.ai-generator-panel {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid var(--grid);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.ai-generator-panel form { display: grid; gap: 10px; }
+.ai-generator-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ai-generator-copy label { font-weight: 800; }
+.ai-generator-copy span,
+.ai-generator-actions span { color: var(--muted); font-size: 13px; }
+.ai-generator-panel textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  padding: 10px 12px;
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  background: var(--select-bg);
+  color: var(--text);
+  font: inherit;
+}
+.ai-generator-panel textarea:focus { outline: 2px solid #60a5fa; outline-offset: 1px; }
+.ai-generator-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 /* Role tabs for employee availability */
 .role-tabs { margin: 12px 0 16px; display: flex; flex-direction: column; gap: 6px; }

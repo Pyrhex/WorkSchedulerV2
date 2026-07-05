@@ -1,3 +1,6 @@
+# June 28th, 2026
+- Added AI schedule generation (work in progress). Use at your own risk.
+
 # June 27th, 2026
 - Fixed export shuttle/aircrew to only export one schedule at a time instead of two.
 

@@ -17,7 +17,7 @@ from functools import lru_cache
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from random import choice, sample
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
@@ -207,6 +207,9 @@ def inject_database_switcher() -> dict[str, Any]:
         "database_options": options,
         "active_database_choice": current_choice,
         "active_database_label": _database_label(current_choice),
+        "openai_rule_interpreter_available": _openai_rule_interpreter_configured(),
+        "openai_rule_interpreter_model": _openai_rule_model(),
+        "openai_rule_interpreter_via_proxy": _openai_base_url() != "https://api.openai.com/v1",
         "recent_updates_html": recent_updates_html,
         "recent_updates_version": recent_updates_version,
     }
@@ -540,6 +543,8 @@ def is_suggested_crew_label(value: Optional[str]) -> bool:
 
 UNDO_DELETE_SECONDS = 20
 _pending_period_undos: Dict[str, dict] = {}
+AI_UNDO_SECONDS = 10 * 60
+_pending_ai_undos: Dict[str, dict] = {}
 
 
 def _prune_expired_period_undos() -> None:
@@ -548,6 +553,13 @@ def _prune_expired_period_undos() -> None:
     expired = [tok for tok, data in _pending_period_undos.items() if data.get("expires", 0) <= now]
     for tok in expired:
         _pending_period_undos.pop(tok, None)
+
+
+def _prune_expired_ai_undos() -> None:
+    now = time.time()
+    expired = [token for token, payload in _pending_ai_undos.items() if payload.get("expires", 0) <= now]
+    for token in expired:
+        _pending_ai_undos.pop(token, None)
 
 # Seniority order for Front Desk manager-on-duty selection
 SENIORITY_ORDER = [
@@ -2706,6 +2718,33 @@ def aircrew_time_filter(value: Optional[str]) -> str:
 def view_week(week_id: int):
     ctx = build_week_context(week_id)
     meta = _with_template_upload_meta(ctx["meta"])
+    _prune_expired_ai_undos()
+    undo_token = (request.args.get("ai_undo") or "").strip()
+    undo_payload = _pending_ai_undos.get(undo_token) if undo_token else None
+    if undo_payload and undo_payload.get("week_id") == week_id:
+        meta["ai_undo_token"] = undo_token
+        meta["ai_undo_seconds"] = max(0, int(undo_payload["expires"] - time.time()))
+    if request.args.get("ai_undone") == "1":
+        meta["success_banner"] = "AI-generated changes were undone. The previous week was restored."
+    elif request.args.get("ai_generated") is not None:
+        generated = request.args.get("ai_generated", type=int) or 0
+        locked = request.args.get("ai_locked", type=int) or 0
+        applied_rules = request.args.get("ai_rules", type=int) or 0
+        interpreter = (request.args.get("ai_interpreter") or "none").strip()
+        interpretation = (request.args.get("ai_interpretation") or "").strip()[:240]
+        interpreter_label = (
+            f"Interpreted by {_openai_rule_model()}."
+            if interpreter == "openai"
+            else "Limited local interpretation was used."
+            if interpreter == "local_fallback"
+            else ""
+        )
+        meta["success_banner"] = (
+            f"AI Generate filled {generated} open shifts and preserved "
+            f"{locked} preselected dropdowns for this week. "
+            f"Applied {applied_rules} typed rule{'s' if applied_rules != 1 else ''}. "
+            f"{interpreter_label} {interpretation}"
+        )
     (
         counts,
         missing,
@@ -4650,6 +4689,794 @@ def generate_new_schedule_db(week_id: int):
         s.commit()
 
 
+def _ai_history_role_token(employee: Employee, value: Optional[str], section_names: dict[int, str]) -> tuple[Optional[str], Optional[str]]:
+    """Classify a historical working assignment into a schedulable role/token."""
+    label = (value or "").strip()
+    if not label or label in NEUTRAL_ASSIGNMENT_VALUES:
+        return None, None
+    if label.startswith(("AM (6:", "PM (2:", "Audit")):
+        return "Front Desk", _fd_variant(label)
+    if label in {"5AM–12PM", "6AM–12PM", "7AM–12PM"}:
+        return "Breakfast Bar", label
+    if label == "8AM–4:30PM":
+        return "Maintenance", label
+    shuttle_variant = _infer_shuttle_variant(label)
+    if shuttle_variant in {"AM", "Midday", "PM", "Crew"}:
+        return "Shuttle", shuttle_variant
+    primary_role = section_names.get(employee.section_id)
+    return (primary_role, label) if primary_role else (None, None)
+
+
+def _ai_instruction_shift_keys(text: str) -> set[str]:
+    normalized = text.lower().replace("–", "-")
+    keys: set[str] = set()
+    for exact in ("10:15", "10:00", "6:15", "6:00", "2:15", "2:00", "5:45", "8:00", "9:00"):
+        if exact in normalized:
+            keys.add(exact)
+    keyword_patterns = {
+        "Audit": r"\baudit(?:s)?\b",
+        "Midday": r"\bmidday\b",
+        "Crew": r"\bcrew\b",
+        "Maintenance": r"\bmaintenance\b",
+        "5AM": r"\b5\s*(?:am|a\.m\.)\b",
+        "6AM": r"\b6\s*(?:am|a\.m\.)\b",
+        "7AM": r"\b7\s*(?:am|a\.m\.)\b",
+        "AM": r"\bam\b|morning shift",
+        "PM": r"\bpm\b|afternoon shift|evening shift",
+    }
+    for key, pattern in keyword_patterns.items():
+        if re.search(pattern, normalized):
+            keys.add(key)
+    return keys
+
+
+def _ai_shift_matches_instruction(label: str, token: str, shift_key: str) -> bool:
+    normalized_label = label.lower().replace("–", "-")
+    if shift_key in {"10:15", "10:00", "6:15", "6:00", "2:15", "2:00", "5:45", "8:00", "9:00"}:
+        return shift_key in normalized_label
+    if shift_key == "Maintenance":
+        return label == "8AM–4:30PM"
+    if shift_key in {"5AM", "6AM", "7AM"}:
+        return label.startswith(shift_key)
+    return token.lower() == shift_key.lower()
+
+
+def _new_ai_prompt_rules() -> dict[str, Any]:
+    return {
+        "blocked": set(),
+        "blocked_days": set(),
+        "blocked_shifts": set(),
+        "preferred": Counter(),
+        "preference_pairs": [],
+        "start_before_pairs": [],
+        "preferred_days": Counter(),
+        "preferred_shifts": Counter(),
+        "max_shifts": {},
+        "applied": [],
+    }
+
+
+def _parse_ai_schedule_instructions(instructions: str, employees: list[Employee]) -> dict[str, Any]:
+    """Parse concise natural-language scheduling preferences into temporary rules."""
+    rules = _new_ai_prompt_rules()
+    raw = (instructions or "").strip()[:2000]
+    if not raw:
+        return rules
+
+    employees_by_name: dict[str, list[int]] = defaultdict(list)
+    for employee in employees:
+        employees_by_name[employee.name.lower()].append(employee.id)
+    ordered_names = sorted(employees_by_name, key=len, reverse=True)
+    weekdays = {
+        "monday": 0, "mon": 0,
+        "tuesday": 1, "tue": 1, "tues": 1,
+        "wednesday": 2, "wed": 2,
+        "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+        "friday": 4, "fri": 4,
+        "saturday": 5, "sat": 5,
+        "sunday": 6, "sun": 6,
+    }
+
+    lines = [part.strip() for part in re.split(r"[\n;]+|(?<=[.!?])\s+", raw) if part.strip()]
+    for line in lines:
+        lowered = line.lower()
+        matched_names = [
+            name for name in ordered_names
+            if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", lowered)
+        ]
+        if not matched_names:
+            continue
+
+        # "Prefer Tristan over Oscar" is treated as an explicit head-to-head rule.
+        pair_match = re.search(r"\b(?:prefer|prioritize)\s+(.+?)\s+over\s+(.+?)(?:[.!?]|$)", lowered)
+        if pair_match:
+            preferred_names = [name for name in matched_names if name in pair_match.group(1)]
+            other_names = [name for name in matched_names if name in pair_match.group(2)]
+            if preferred_names and other_names:
+                preferred_ids = {
+                    employee_id
+                    for name in preferred_names
+                    for employee_id in employees_by_name[name]
+                }
+                other_ids = {
+                    employee_id
+                    for name in other_names
+                    for employee_id in employees_by_name[name]
+                }
+                rules["preference_pairs"].append((preferred_ids, other_ids))
+                rules["applied"].append(line)
+                continue
+
+        # Relative stagger rule, e.g. "Abdi should start before Emilyn".
+        # This affects their start-time ordering only; it does not globally
+        # prioritize either employee over the rest of the team.
+        start_before_match = re.search(
+            r"\b(.+?)\s+(?:should\s+)?start\s+(?:earlier than|before)\s+(.+?)(?:[.!?]|$)",
+            lowered,
+        )
+        if start_before_match:
+            before_names = [name for name in matched_names if name in start_before_match.group(1)]
+            after_names = [name for name in matched_names if name in start_before_match.group(2)]
+            if before_names and after_names:
+                before_ids = {
+                    employee_id
+                    for name in before_names
+                    for employee_id in employees_by_name[name]
+                }
+                after_ids = {
+                    employee_id
+                    for name in after_names
+                    for employee_id in employees_by_name[name]
+                }
+                day_indexes = {
+                    day_index
+                    for day_name, day_index in weekdays.items()
+                    if re.search(rf"\b{day_name}\b", lowered)
+                }
+                shift_keys = _ai_instruction_shift_keys(lowered)
+                rules["start_before_pairs"].append(
+                    (before_ids, after_ids, day_indexes, shift_keys)
+                )
+                rules["applied"].append(line)
+                continue
+
+        employee_ids = [employee_id for name in matched_names for employee_id in employees_by_name[name]]
+        day_indexes = {
+            day_index
+            for day_name, day_index in weekdays.items()
+            if re.search(rf"\b{day_name}\b", lowered)
+        }
+        shift_keys = _ai_instruction_shift_keys(lowered)
+        maximum = re.search(r"\bmax(?:imum)?\s+(?:of\s+)?(\d+)\s+shifts?\b", lowered)
+        if not maximum:
+            maximum = re.search(r"\bno more than\s+(\d+)\s+shifts?\b", lowered)
+        if maximum:
+            cap = max(0, min(7, int(maximum.group(1))))
+            for employee_id in employee_ids:
+                rules["max_shifts"][employee_id] = cap
+            rules["applied"].append(line)
+            continue
+
+        negative = any(
+            phrase in lowered
+            for phrase in ("do not", "don't", "never", "avoid", "unavailable", "cannot", "can't", "should not", "no ")
+        )
+        if negative:
+            if shift_keys:
+                for employee_id in employee_ids:
+                    for shift_key in shift_keys:
+                        rules["blocked_shifts"].add((employee_id, shift_key))
+            elif day_indexes:
+                for employee_id in employee_ids:
+                    for day_index in day_indexes:
+                        rules["blocked_days"].add((employee_id, day_index))
+            else:
+                rules["blocked"].update(employee_ids)
+            rules["applied"].append(line)
+            continue
+
+        if shift_keys:
+            for employee_id in employee_ids:
+                for shift_key in shift_keys:
+                    rules["preferred_shifts"][(employee_id, shift_key)] += 600
+        if day_indexes:
+            for employee_id in employee_ids:
+                for day_index in day_indexes:
+                    rules["preferred_days"][(employee_id, day_index)] += 300
+        if not shift_keys and not day_indexes and any(word in lowered for word in ("prefer", "prioritize", "schedule", "use")):
+            for employee_id in employee_ids:
+                rules["preferred"][employee_id] += 350
+        if shift_keys or day_indexes or any(word in lowered for word in ("prefer", "prioritize", "schedule", "use")):
+            rules["applied"].append(line)
+    return rules
+
+
+def _openai_rule_api_key() -> str:
+    return (os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _openai_base_url() -> str:
+    configured = (
+        os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE_URL")
+        or "https://api.openai.com/v1"
+    ).strip()
+    return configured.rstrip("/")
+
+
+def _openai_responses_url() -> str:
+    base_url = _openai_base_url()
+    return base_url if base_url.endswith("/responses") else f"{base_url}/responses"
+
+
+def _openai_rule_interpreter_configured() -> bool:
+    return bool(_openai_rule_api_key()) or _openai_base_url() != "https://api.openai.com/v1"
+
+
+def _openai_rule_model() -> str:
+    return (os.getenv("OPENAI_RULE_MODEL") or "gpt-5.5").strip()
+
+
+def _extract_responses_output_text(payload: dict[str, Any]) -> str:
+    direct = payload.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    for output_item in payload.get("output") or []:
+        if not isinstance(output_item, dict) or output_item.get("type") != "message":
+            continue
+        for content_item in output_item.get("content") or []:
+            if isinstance(content_item, dict) and content_item.get("type") == "output_text":
+                text_value = content_item.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    return text_value.strip()
+    raise ValueError("OpenAI response did not contain structured output text.")
+
+
+def _employee_ids_named(name: str, employees: list[Employee]) -> set[int]:
+    normalized = (name or "").strip().casefold()
+    return {employee.id for employee in employees if employee.name.casefold() == normalized}
+
+
+def _model_rules_to_scheduler_rules(model_result: dict[str, Any], employees: list[Employee]) -> dict[str, Any]:
+    rules = _new_ai_prompt_rules()
+    day_indexes = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for item in model_result.get("rules") or []:
+        if not isinstance(item, dict):
+            continue
+        rule_type = str(item.get("type") or "").strip()
+        employee_ids = {
+            employee_id
+            for name in item.get("employees") or []
+            for employee_id in _employee_ids_named(str(name), employees)
+        }
+        other_ids = {
+            employee_id
+            for name in item.get("other_employees") or []
+            for employee_id in _employee_ids_named(str(name), employees)
+        }
+        days = {
+            day_indexes[str(day).casefold()]
+            for day in item.get("days") or []
+            if str(day).casefold() in day_indexes
+        }
+        shift_keys = _ai_instruction_shift_keys(str(item.get("shift") or ""))
+        explanation = str(item.get("explanation") or rule_type).strip()[:240]
+        if not employee_ids:
+            continue
+        applied = False
+        if rule_type == "prefer_over" and other_ids:
+            rules["preference_pairs"].append((employee_ids, other_ids))
+            applied = True
+        elif rule_type == "start_before" and other_ids:
+            rules["start_before_pairs"].append((employee_ids, other_ids, days, shift_keys))
+            applied = True
+        elif rule_type == "prefer":
+            for employee_id in employee_ids:
+                rules["preferred"][employee_id] += 350
+            applied = True
+        elif rule_type == "avoid":
+            rules["blocked"].update(employee_ids)
+            applied = True
+        elif rule_type in {"prefer_shift", "avoid_shift"} and shift_keys:
+            target = rules["preferred_shifts"] if rule_type == "prefer_shift" else rules["blocked_shifts"]
+            for employee_id in employee_ids:
+                for shift_key in shift_keys:
+                    if rule_type == "prefer_shift":
+                        target[(employee_id, shift_key)] += 600
+                    else:
+                        target.add((employee_id, shift_key))
+            applied = True
+        elif rule_type in {"prefer_day", "avoid_day"} and days:
+            target = rules["preferred_days"] if rule_type == "prefer_day" else rules["blocked_days"]
+            for employee_id in employee_ids:
+                for day_index in days:
+                    if rule_type == "prefer_day":
+                        target[(employee_id, day_index)] += 300
+                    else:
+                        target.add((employee_id, day_index))
+            applied = True
+        elif rule_type == "max_shifts":
+            maximum = item.get("max_shifts")
+            if isinstance(maximum, int):
+                for employee_id in employee_ids:
+                    rules["max_shifts"][employee_id] = max(0, min(7, maximum))
+                applied = True
+        if applied:
+            rules["applied"].append(explanation or rule_type)
+    return rules
+
+
+def _interpret_ai_schedule_instructions(
+    instructions: str,
+    employees: list[Employee],
+    week: Week,
+) -> tuple[dict[str, Any], str, str]:
+    """Interpret free-form rules with OpenAI, falling back locally when unavailable."""
+    raw = (instructions or "").strip()[:2000]
+    if not raw:
+        return _new_ai_prompt_rules(), "none", "No typed rules."
+    api_key = _openai_rule_api_key()
+    if not _openai_rule_interpreter_configured():
+        fallback = _parse_ai_schedule_instructions(raw, employees)
+        return fallback, "local_fallback", "OpenAI API key is not configured; used the limited local parser."
+
+    employee_context = [
+        {
+            "name": employee.name,
+            "role": employee.section.name if employee.section else "Unknown",
+        }
+        for employee in employees
+    ]
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "rules": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "prefer_over", "start_before", "prefer", "avoid", "prefer_shift",
+                                "avoid_shift", "prefer_day", "avoid_day", "max_shifts",
+                            ],
+                        },
+                        "employees": {"type": "array", "items": {"type": "string"}},
+                        "other_employees": {"type": "array", "items": {"type": "string"}},
+                        "days": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "Monday", "Tuesday", "Wednesday", "Thursday",
+                                    "Friday", "Saturday", "Sunday",
+                                ],
+                            },
+                        },
+                        "shift": {"type": "string"},
+                        "max_shifts": {"type": ["integer", "null"], "minimum": 0, "maximum": 7},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": [
+                        "type", "employees", "other_employees", "days",
+                        "shift", "max_shifts", "explanation",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["summary", "rules"],
+        "additionalProperties": False,
+    }
+    context = {
+        "week_start": week.start_date.isoformat(),
+        "week_end": (week.start_date + timedelta(days=6)).isoformat(),
+        "employees": employee_context,
+        "manager_request": raw,
+    }
+    try:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        response = requests.post(
+            _openai_responses_url(),
+            headers=headers,
+            json={
+                "model": _openai_rule_model(),
+                "store": False,
+                "instructions": (
+                    "Convert a hotel manager's natural-language scheduling request into structured rules. "
+                    "Resolve pronouns and comparisons from context. Use only exact employee names supplied. "
+                    "A phrase like 'prefer A over B' is pairwise, not a global priority for A. "
+                    "Represent 'A should start before B' or 'A should start earlier than B' as start_before, "
+                    "with A in employees and B in other_employees. This is a relative stagger-time rule, "
+                    "not a global priority. Leave days and shift empty when the manager did not specify them. "
+                    "Do not invent time off or availability. Return no rule for requests that cannot be represented."
+                ),
+                "input": json.dumps(context),
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "schedule_rule_interpretation",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+                "max_output_tokens": 1800,
+            },
+            timeout=25,
+        )
+        response.raise_for_status()
+        model_result = json.loads(_extract_responses_output_text(response.json()))
+        rules = _model_rules_to_scheduler_rules(model_result, employees)
+        summary = str(model_result.get("summary") or "Natural-language rules interpreted.").strip()[:240]
+        return rules, "openai", summary
+    except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError) as exc:
+        app.logger.warning("OpenAI schedule-rule interpretation failed; using local fallback: %s", exc)
+        fallback = _parse_ai_schedule_instructions(raw, employees)
+        return fallback, "local_fallback", "OpenAI interpretation failed; used the limited local parser."
+
+
+def _capture_ai_undo_snapshot(session: Session, week_id: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": assignment.id,
+            "employee_id": assignment.employee_id,
+            "date": assignment.date,
+            "value": assignment.value,
+            "dismissed_timeoff": bool(getattr(assignment, "dismissed_timeoff", False)),
+        }
+        for assignment in session.scalars(
+            select(Assignment).where(Assignment.week_id == week_id).order_by(Assignment.id)
+        )
+    ]
+
+
+def _restore_ai_undo_snapshot(session: Session, week_id: int, snapshot: list[dict[str, Any]]) -> None:
+    session.execute(delete(Assignment).where(Assignment.week_id == week_id))
+    for row in snapshot:
+        assignment = Assignment(
+            id=row["id"],
+            week_id=week_id,
+            employee_id=row["employee_id"],
+            date=row["date"],
+            value=row["value"] or "Set",
+        )
+        if hasattr(assignment, "dismissed_timeoff"):
+            assignment.dismissed_timeoff = bool(row.get("dismissed_timeoff"))
+        session.add(assignment)
+    session.commit()
+
+
+def ai_generate_week_schedule(week_id: int, instructions: str = "") -> dict[str, Any]:
+    """Fill only open cells in one week using assignment patterns since 2026.
+
+    Any value other than ``Set`` is considered explicitly selected and is never
+    modified. Historical weekday/shift patterns provide the strongest ranking
+    signal, while current availability, time off, rest, and weekly caps remain
+    hard constraints.
+    """
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return {
+                "generated": 0, "locked": 0, "history": 0, "rules": 0,
+                "interpreter": "none", "interpretation_summary": "Week not found.",
+            }
+        _ensure_week_and_assignments(s, week.start_date)
+
+        sections = {sec.name: sec for sec in s.scalars(select(Section))}
+        section_names = {sec.id: sec.name for sec in sections.values()}
+        active_employees = list(
+            s.scalars(
+                select(Employee)
+                .order_by(Employee.sort_order.is_(None), Employee.sort_order, Employee.name)
+            )
+        )
+        employee_by_id = {employee.id: employee for employee in active_employees}
+        employee_names = {employee.id: employee.name for employee in active_employees}
+        employee_info = {
+            employee.id: {
+                "role": section_names.get(employee.section_id, ""),
+                "seniority": employee.seniority or 0,
+                "preferred_shift": employee.preferred_shift or None,
+                "pref_per_week": employee.preferred_shifts_per_week,
+                "max_per_week": employee.max_shifts_per_week,
+                "sort_order": employee.sort_order if employee.sort_order is not None else 10000,
+            }
+            for employee in active_employees
+        }
+        prompt_rules, interpreter, interpretation_summary = _interpret_ai_schedule_instructions(
+            instructions,
+            active_employees,
+            week,
+        )
+
+        def employees_for_section(section_name: str) -> list[int]:
+            section = sections.get(section_name)
+            if not section:
+                return []
+            primary = [employee.id for employee in active_employees if employee.section_id == section.id]
+            secondary_ids = {
+                row[0]
+                for row in s.execute(
+                    select(EmployeeRole.employee_id).where(EmployeeRole.section_id == section.id)
+                )
+            }
+            return primary + [employee.id for employee in active_employees if employee.id in secondary_ids and employee.id not in primary]
+
+        capable = {
+            role: employees_for_section(role)
+            for role in ("Front Desk", "Breakfast Bar", "Shuttle", "Maintenance")
+        }
+        week_dates = daterange(week.start_date, 7)
+        assignments = {
+            (assignment.employee_id, assignment.date): assignment
+            for assignment in s.scalars(select(Assignment).where(Assignment.week_id == week.id))
+            if assignment.employee_id in employee_by_id and assignment.date in week_dates
+        }
+        locked_count = s.scalar(
+            select(func.count())
+            .select_from(Assignment)
+            .where(Assignment.week_id == week.id, Assignment.value != "Set")
+        ) or 0
+
+        # Weighted history favors the same weekday and recent schedules while
+        # still learning from every stored schedule beginning January 1, 2026.
+        exact_history: defaultdict[tuple[int, str, int, str], float] = defaultdict(float)
+        token_history: defaultdict[tuple[int, str, str], float] = defaultdict(float)
+        workday_history: defaultdict[tuple[int, str, int], float] = defaultdict(float)
+        weekday_label_history: defaultdict[tuple[int, str, int, str], float] = defaultdict(float)
+        label_history: defaultdict[tuple[int, str, str], float] = defaultdict(float)
+        history_rows = list(
+            s.scalars(
+                select(Assignment)
+                .join(Week, Assignment.week_id == Week.id)
+                .where(
+                    Week.start_date >= date(2026, 1, 1),
+                    Week.start_date < week.start_date,
+                    Assignment.employee_id.in_(list(employee_by_id)),
+                    Assignment.value.not_in(list(NEUTRAL_ASSIGNMENT_VALUES)),
+                )
+            )
+        )
+        for historical in history_rows:
+            employee = employee_by_id.get(historical.employee_id)
+            if not employee or not historical.date:
+                continue
+            role, token = _ai_history_role_token(employee, historical.value, section_names)
+            if role not in capable or not token:
+                continue
+            weeks_ago = max(1, (week.start_date - historical.date).days // 7)
+            recency_weight = 1.0 + max(0, 8 - weeks_ago) * 0.25
+            exact_history[(employee.id, role, historical.date.weekday(), token)] += recency_weight
+            token_history[(employee.id, role, token)] += recency_weight
+            workday_history[(employee.id, role, historical.date.weekday())] += recency_weight
+            weekday_label_history[(employee.id, role, historical.date.weekday(), historical.value)] += recency_weight
+            label_history[(employee.id, role, historical.value)] += recency_weight
+
+        avail_idx = _build_availability_index(s)
+        assigned_counts: Counter[int] = Counter()
+        assigned_today: dict[date, set[int]] = {day: set() for day in week_dates}
+        coverage: dict[tuple[date, str, str], int] = defaultdict(int)
+        exact_label_counts: dict[tuple[date, str], int] = defaultdict(int)
+
+        for (employee_id, day), assignment in assignments.items():
+            value = assignment.value or "Set"
+            if value == "Set":
+                continue
+            assigned_today[day].add(employee_id)
+            if value not in NEUTRAL_ASSIGNMENT_VALUES:
+                assigned_counts[employee_id] += 1
+                role, token = _ai_history_role_token(employee_by_id[employee_id], value, section_names)
+                if role and token:
+                    coverage[(day, role, token)] += 1
+                    exact_label_counts[(day, value)] += 1
+
+        def available(employee_id: int, role: str, label: str, day: date) -> bool:
+            if employee_id in prompt_rules["blocked"]:
+                return False
+            if (employee_id, day.weekday()) in prompt_rules["blocked_days"]:
+                return False
+            instruction_token = _fd_variant(label) if role == "Front Desk" else (_infer_shuttle_variant(label) if role == "Shuttle" else label)
+            if any(
+                rule_employee_id == employee_id
+                and _ai_shift_matches_instruction(label, instruction_token or label, shift_key)
+                for rule_employee_id, shift_key in prompt_rules["blocked_shifts"]
+            ):
+                return False
+            if employee_id in assigned_today[day]:
+                return False
+            employee = employee_by_id[employee_id]
+            if has_any_timeoff(employee.name, role, day, s):
+                return False
+            configured = avail_idx.get(employee_id)
+            if configured:
+                if role == "Shuttle" and _infer_shuttle_variant(label) == "Crew":
+                    crew_available = any(
+                        weekday == day.weekday() and _infer_shuttle_variant(allowed_label) == "Crew"
+                        for weekday, allowed_label in configured
+                    )
+                    if not crew_available:
+                        return False
+                elif not _is_available(employee_id, role, label, day, avail_idx):
+                    return False
+            maximum = prompt_rules["max_shifts"].get(
+                employee_id,
+                _effective_max_for_role(employee_info, employee_id, role),
+            )
+            if maximum is not None and assigned_counts[employee_id] >= maximum:
+                return False
+            previous = s.scalar(
+                select(Assignment).where(
+                    Assignment.employee_id == employee_id,
+                    Assignment.date == day - timedelta(days=1),
+                )
+            )
+            if previous and previous.value and previous.value not in NEUTRAL_ASSIGNMENT_VALUES:
+                previous_value = previous.value
+                if role == "Front Desk":
+                    if label.startswith("AM") and previous_value.startswith("PM"):
+                        return False
+                    if label.startswith("PM") and previous_value.startswith("Audit"):
+                        return False
+                if role == "Shuttle":
+                    previous_variant = _infer_shuttle_variant(previous_value)
+                    if label.startswith("AM") and previous_variant in {"PM", "Crew"}:
+                        return False
+                    if label.startswith("Midday") and previous_variant == "Crew":
+                        return False
+            return True
+
+        def candidate_score(
+            employee_id: int,
+            role: str,
+            token: str,
+            label: str,
+            day: date,
+            candidate_pool: list[int],
+        ) -> tuple:
+            info = employee_info[employee_id]
+            preferred = info["preferred_shift"]
+            preferred_match = preferred is not None and preferred == _pref_token(role, label)
+            preferred_weekly = info["pref_per_week"]
+            under_preferred = preferred_weekly is not None and assigned_counts[employee_id] < preferred_weekly
+            learned = (
+                exact_history[(employee_id, role, day.weekday(), token)] * 7
+                + token_history[(employee_id, role, token)] * 2
+                + workday_history[(employee_id, role, day.weekday())]
+                + weekday_label_history[(employee_id, role, day.weekday(), label)] * 9
+                + label_history[(employee_id, role, label)] * 3
+            )
+            prompt_score = prompt_rules["preferred"].get(employee_id, 0)
+            prompt_score += prompt_rules["preferred_days"].get((employee_id, day.weekday()), 0)
+            prompt_score += sum(
+                adjustment
+                for (rule_employee_id, shift_key), adjustment in prompt_rules["preferred_shifts"].items()
+                if rule_employee_id == employee_id
+                and _ai_shift_matches_instruction(label, token, shift_key)
+            )
+            pair_priority = 0
+            for preferred_ids, other_ids in prompt_rules["preference_pairs"]:
+                if employee_id in other_ids and preferred_ids.intersection(candidate_pool):
+                    pair_priority -= 1
+
+            # Typed relative-start rules outrank history while remaining
+            # pairwise. They only affect employees sharing this day's role and
+            # shift token, so "Abdi before Emilyn" does not raise Abdi above
+            # every other employee or move either person to another shift.
+            start_order_priority = 0
+            candidate_start = _shift_start_minutes(label)
+            for before_ids, after_ids, rule_days, rule_shift_keys in prompt_rules["start_before_pairs"]:
+                if rule_days and day.weekday() not in rule_days:
+                    continue
+                if rule_shift_keys and not any(
+                    _ai_shift_matches_instruction(label, token, shift_key)
+                    for shift_key in rule_shift_keys
+                ):
+                    continue
+
+                before_candidates = before_ids.intersection(candidate_pool)
+                after_candidates = after_ids.intersection(candidate_pool)
+                if employee_id in before_ids and after_candidates:
+                    start_order_priority += 2
+                elif employee_id in after_ids and before_candidates:
+                    start_order_priority -= 2
+
+                if candidate_start is None:
+                    continue
+                other_ids = after_ids if employee_id in before_ids else before_ids if employee_id in after_ids else set()
+                for other_id in other_ids:
+                    other_assignment = assignments.get((other_id, day))
+                    if not other_assignment or (other_assignment.value or "Set") == "Set":
+                        continue
+                    other_role, other_token = _ai_history_role_token(
+                        employee_by_id[other_id], other_assignment.value, section_names
+                    )
+                    if other_role != role or other_token != token:
+                        continue
+                    other_start = _shift_start_minutes(other_assignment.value)
+                    if other_start is None:
+                        continue
+                    correctly_ordered = (
+                        candidate_start < other_start
+                        if employee_id in before_ids
+                        else other_start < candidate_start
+                    )
+                    start_order_priority += 2 if correctly_ordered else -2
+            fallback_score = learned + (5 if preferred_match else 0) + (2 if under_preferred else 0) - assigned_counts[employee_id] * 2
+            return (
+                prompt_score,
+                pair_priority,
+                start_order_priority,
+                fallback_score,
+                -assigned_counts[employee_id],
+                info["seniority"],
+                -info["sort_order"],
+                employee_names[employee_id],
+            )
+
+        generated = 0
+
+        def fill(role: str, token: str, required: int, day: date, label_options: list[str]) -> None:
+            nonlocal generated
+            while coverage[(day, role, token)] < required:
+                label = min(label_options, key=lambda item: (exact_label_counts[(day, item)], label_options.index(item)))
+                candidates = [
+                    employee_id
+                    for employee_id in capable[role]
+                    if available(employee_id, role, label, day)
+                ]
+                if not candidates:
+                    break
+                selected = max(
+                    candidates,
+                    key=lambda employee_id: candidate_score(employee_id, role, token, label, day, candidates),
+                )
+                assignment = assignments.get((selected, day))
+                if assignment is None:
+                    assignment = Assignment(week_id=week.id, employee_id=selected, date=day, value="Set")
+                    s.add(assignment)
+                    assignments[(selected, day)] = assignment
+                assignment.value = label
+                if hasattr(assignment, "dismissed_timeoff"):
+                    assignment.dismissed_timeoff = False
+                assigned_today[day].add(selected)
+                assigned_counts[selected] += 1
+                coverage[(day, role, token)] += 1
+                exact_label_counts[(day, label)] += 1
+                generated += 1
+
+        for day in week_dates:
+            fill("Front Desk", "AM", 2, day, ["AM (6:00AM–2:00PM)", "AM (6:15AM–2:15PM)"])
+            fill("Front Desk", "PM", 2, day, ["PM (2:00PM–10:00PM)", "PM (2:15PM–10:15PM)"])
+            fill("Front Desk", "Audit", 2, day, ["Audit (10:00PM–6:00AM)", "Audit (10:15PM–6:15AM)"])
+            for breakfast_shift in ("5AM–12PM", "6AM–12PM", "7AM–12PM"):
+                fill("Breakfast Bar", breakfast_shift, 1, day, [breakfast_shift])
+            fill("Maintenance", "8AM–4:30PM", 1, day, ["8AM–4:30PM"])
+            fill("Shuttle", "AM", 1, day, ["AM (3:30AM–11:30AM)"])
+            fill("Shuttle", "Midday", 1, day, ["Midday (10:30AM–6:30PM)"])
+            fill("Shuttle", "PM", 1, day, [SHUTTLE_PM_LABEL])
+            crew_label = _suggest_shuttle_shift(_aircrew_minutes_for_day(s, week.id, day)) or DEFAULT_CREW_SHIFT
+            fill("Shuttle", "Crew", 1, day, [crew_label])
+
+        s.commit()
+        return {
+            "generated": generated,
+            "locked": int(locked_count),
+            "history": len(history_rows),
+            "rules": len(prompt_rules["applied"]),
+            "interpreter": interpreter,
+            "interpretation_summary": interpretation_summary,
+        }
+
+
 def _template_slot_label(slot: int) -> str:
     return f"Template {slot}"
 
@@ -5276,6 +6103,53 @@ def generate():
 def generate_week(week_id: int):
     generate_4_week_schedule(week_id)
     return redirect(url_for("view_week", week_id=week_id))
+
+
+@app.route("/week/<int:week_id>/ai-generate", methods=["POST"])
+def ai_generate_week(week_id: int):
+    instructions = (request.form.get("ai_instructions") or "").strip()[:2000]
+    with SessionLocal() as s:
+        if not s.get(Week, week_id):
+            return "Week not found", 404
+        snapshot = _capture_ai_undo_snapshot(s, week_id)
+    result = ai_generate_week_schedule(week_id, instructions=instructions)
+    _prune_expired_ai_undos()
+    for existing_token, payload in list(_pending_ai_undos.items()):
+        if payload.get("week_id") == week_id:
+            _pending_ai_undos.pop(existing_token, None)
+    undo_token = uuid.uuid4().hex
+    _pending_ai_undos[undo_token] = {
+        "week_id": week_id,
+        "assignments": snapshot,
+        "expires": time.time() + AI_UNDO_SECONDS,
+    }
+    return redirect(
+        url_for(
+            "view_week",
+            week_id=week_id,
+            ai_generated=result["generated"],
+            ai_locked=result["locked"],
+            ai_rules=result["rules"],
+            ai_interpreter=result["interpreter"],
+            ai_interpretation=result["interpretation_summary"],
+            ai_undo=undo_token,
+        )
+    )
+
+
+@app.route("/week/<int:week_id>/ai-generate/undo", methods=["POST"])
+def undo_ai_generate_week(week_id: int):
+    _prune_expired_ai_undos()
+    undo_token = (request.form.get("undo_token") or "").strip()
+    payload = _pending_ai_undos.get(undo_token)
+    if not payload or payload.get("week_id") != week_id:
+        return redirect(url_for("view_week", week_id=week_id))
+    with SessionLocal() as s:
+        if not s.get(Week, week_id):
+            return "Week not found", 404
+        _restore_ai_undo_snapshot(s, week_id, payload["assignments"])
+    _pending_ai_undos.pop(undo_token, None)
+    return redirect(url_for("view_week", week_id=week_id, ai_undone=1))
 
 
 def _delete_period_with_undo(s: Session, week: Week) -> Optional[str]:

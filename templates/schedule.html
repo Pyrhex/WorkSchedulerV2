@@ -7,6 +7,15 @@
 </script>
   <div class="content-inner full-width">
     <div class="banner success">{{ meta.success_banner }}</div>
+    {% if meta.ai_undo_token %}
+      <div class="ai-undo-bar">
+        <span>You can undo this AI generation for the next {{ meta.ai_undo_seconds }} seconds.</span>
+        <form action="/week/{{ meta.week_id }}/ai-generate/undo" method="post">
+          <input type="hidden" name="undo_token" value="{{ meta.ai_undo_token }}">
+          <button class="btn ghost" type="submit">Undo AI Generate</button>
+        </form>
+      </div>
+    {% endif %}
 
     <section class="schedule-header">
       <div class="title">Schedule: {{ meta.range_label }}</div>
@@ -61,6 +70,33 @@
       {% endif %}
       <div class="subtitle">{{ meta.fd_note }}</div>
     </section>
+
+    {% if meta.week_id %}
+    <section class="ai-generator-panel" aria-labelledby="ai-generator-title">
+      <form action="/week/{{ meta.week_id }}/ai-generate" method="post" id="ai-generate-form">
+        <div class="ai-generator-copy">
+          <label id="ai-generator-title" for="ai-instructions">AI scheduling preferences</label>
+          <span>Write naturally. Typed rules take priority over past schedules and apply only to this generation.</span>
+        </div>
+        <textarea id="ai-instructions"
+                  name="ai_instructions"
+                  maxlength="2000"
+                  rows="3"
+                  placeholder="Example: Tristan has been working a lot lately, so when he and Oscar are both suitable, choose Oscar. Keep Abdi on his usual 10:15 audit start and give Cindy no more than four shifts."></textarea>
+        <div class="ai-generator-actions">
+          <span>
+            {% if openai_rule_interpreter_available %}
+              Natural-language interpretation enabled ({{ openai_rule_interpreter_model }}{% if openai_rule_interpreter_via_proxy %} via CLIProxy{% endif %}).
+            {% else %}
+              Limited parser active—add OPENAI_API_KEY to enable full natural-language understanding.
+            {% endif %}
+            Existing dropdown selections remain locked.
+          </span>
+          <button class="btn ai" type="submit">AI Generate</button>
+        </div>
+      </form>
+    </section>
+    {% endif %}
 
     <section class="week-nav">
       <button class="btn ghost" id="prev-week" aria-label="Previous Week">&lt; Previous</button>
