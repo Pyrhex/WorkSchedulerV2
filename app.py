@@ -3336,15 +3336,41 @@ def employee_availability(eid: int):
 
 @app.route("/timeoff")
 def timeoff_page():
+    def timeoff_label(start: date, end: date) -> str:
+        if start == end:
+            return start.strftime("%b %d, %Y")
+        return f"{start.strftime('%b %d, %Y')} to {end.strftime('%b %d, %Y')}"
+
+    today = date.today()
     with SessionLocal() as s:
-        items = []
+        upcoming_items = []
+        archived_items = []
         for t in s.scalars(select(TimeOff)):
-            same_day = t.from_date == t.to_date
-            label = t.from_date.strftime("%b %d") if same_day else f"{t.from_date.strftime('%b %d')} to {t.to_date.strftime('%b %d')}"
-            items.append({"id": t.id, "name": t.name, "role": t.role, "label": label, "approved": t.approved, "vacation": bool(getattr(t, "vacation", False))})
+            item = {
+                "id": t.id,
+                "name": t.name,
+                "role": t.role,
+                "label": timeoff_label(t.from_date, t.to_date),
+                "approved": t.approved,
+                "vacation": bool(getattr(t, "vacation", False)),
+                "from_date": t.from_date,
+                "to_date": t.to_date,
+            }
+            if t.to_date < today:
+                archived_items.append(item)
+            else:
+                upcoming_items.append(item)
+        upcoming_items.sort(key=lambda item: (item["from_date"], item["to_date"], item["name"].lower()))
+        archived_items.sort(key=lambda item: (item["to_date"], item["from_date"], item["name"].lower()), reverse=True)
         employees = list(s.scalars(select(Employee)))
         sections = list(s.scalars(select(Section)))
-    return render_template("timeoff.html", time_off=items, employees=employees, sections=sections)
+    return render_template(
+        "timeoff.html",
+        time_off=upcoming_items,
+        archived_time_off=archived_items,
+        employees=employees,
+        sections=sections,
+    )
 
 
 @app.route("/timeoff/new", methods=["GET", "POST"])
