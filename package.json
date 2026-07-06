@@ -1,0 +1,27 @@
+{
+  "name": "work-scheduler-v2",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Work scheduling platform",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w server && npm run build -w client",
+    "migrate": "npm run migrate -w server",
+    "postinstall": "npm run prisma:generate -w server"
+  },
+  "keywords": [
+    "scheduling",
+    "react",
+    "express",
+    "prisma"
+  ],
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

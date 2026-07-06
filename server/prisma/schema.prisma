@@ -1,0 +1,137 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Section {
+  id             Int            @id @default(autoincrement())
+  name           String         @unique
+  requiredPerDay Int?           @map("required_per_day")
+  employees      Employee[]
+  employeeRoles  EmployeeRole[]
+
+  @@map("sections")
+}
+
+model Employee {
+  id                     Int                    @id @default(autoincrement())
+  name                   String
+  sectionId              Int                    @map("section_id")
+  availability           String?
+  preferredShift         String?                @map("preferred_shift")
+  seniority              Int?
+  preferredShiftsPerWeek Int?                   @map("preferred_shifts_per_week")
+  maxShiftsPerWeek       Int?                   @map("max_shifts_per_week")
+  sortOrder              Int?                   @map("sort_order")
+  firstName              String?                @map("first_name")
+  lastName               String?                @map("last_name")
+  temporary              Boolean                @default(false)
+  section                Section                @relation(fields: [sectionId], references: [id])
+  roles                  EmployeeRole[]
+  availabilityRules      EmployeeAvailability[]
+  assignments            Assignment[]
+
+  @@map("employees")
+}
+
+model EmployeeRole {
+  id         Int      @id @default(autoincrement())
+  employeeId Int      @map("employee_id")
+  sectionId  Int      @map("section_id")
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  section    Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  @@map("employee_roles")
+}
+
+model EmployeeAvailability {
+  id         Int      @id @default(autoincrement())
+  employeeId Int      @map("employee_id")
+  dayOfWeek  Int      @map("day_of_week")
+  shiftLabel String   @map("shift_label")
+  allowed    Boolean  @default(true)
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@map("employee_availability")
+}
+
+model Week {
+  id                 Int                 @id @default(autoincrement())
+  startDate          String              @unique @map("start_date")
+  assignments        Assignment[]
+  aircrewArrivals    AircrewArrival[]
+  occupancySnapshots OccupancySnapshot[]
+
+  @@map("weeks")
+}
+
+model Assignment {
+  id                Int      @id @default(autoincrement())
+  weekId            Int      @map("week_id")
+  employeeId        Int      @map("employee_id")
+  date              String
+  value             String
+  dismissedTimeOff  Boolean  @default(false) @map("dismissed_timeoff")
+  week              Week     @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  employee          Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@map("assignments")
+}
+
+model AircrewArrival {
+  id      Int      @id @default(autoincrement())
+  weekId  Int      @map("week_id")
+  carrier String
+  date    String
+  times   String   @default("")
+  week    Week     @relation(fields: [weekId], references: [id], onDelete: Cascade)
+
+  @@unique([weekId, carrier, date], name: "uniq_aircrew_week_carrier_date")
+  @@map("aircrew_arrivals")
+}
+
+model AircrewCarrier {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  @@map("aircrew_carriers")
+}
+
+model OccupancySnapshot {
+  id         Int       @id @default(autoincrement())
+  weekId     Int       @map("week_id")
+  date       String
+  percentage Float?
+  uploadedAt String?   @map("uploaded_at")
+  week       Week      @relation(fields: [weekId], references: [id], onDelete: Cascade)
+
+  @@unique([weekId, date], name: "uniq_occupancy_week_date")
+  @@map("occupancy_levels")
+}
+
+model TimeOff {
+  id           Int      @id @default(autoincrement())
+  employeeName String   @map("name")
+  role         String
+  startDate    String   @map("from_date")
+  endDate      String   @map("to_date")
+  approved     Boolean  @default(false)
+  vacation     Boolean  @default(false)
+
+  @@map("timeoff")
+}
+
+model ScheduleTemplate {
+  id             Int      @id @default(autoincrement())
+  slot           Int      @unique
+  name           String
+  payload        String
+  savedWeekStart String? @map("saved_week_start")
+  updatedAt      String  @map("updated_at")
+
+  @@map("schedule_templates")
+}

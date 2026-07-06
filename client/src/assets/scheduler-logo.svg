@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Work Scheduler logo</title>
+  <rect width="128" height="128" rx="28" fill="#0f1720"/>
+  <path fill="#d0a95f" d="M31 32h66c6.6 0 12 5.4 12 12v53c0 6.6-5.4 12-12 12H31c-6.6 0-12-5.4-12-12V44c0-6.6 5.4-12 12-12Zm0 21v44h66V53H31Z"/>
+  <path fill="#efe6d2" d="M39 21a6 6 0 0 1 12 0v20a6 6 0 0 1-12 0V21Zm38 0a6 6 0 0 1 12 0v20a6 6 0 0 1-12 0V21Z"/>
+  <path fill="#1e5f42" d="M42 66h16v13H42V66Zm24 0h20v13H66V66Zm-24 20h16v8H42v-8Zm24 0h20v8H66v-8Z"/>
+</svg>
