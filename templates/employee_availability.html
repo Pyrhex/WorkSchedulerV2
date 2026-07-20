@@ -1,18 +1,21 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <div class="content-inner">
-    <section class="schedule-header">
-      <div class="title">Availability — {{ employee.name }}</div>
-      <div class="subtitle">Role: {{ role }}. Toggle allowed shifts per day. Also set seniority and preferred shift.</div>
-      <div class="actions">
-        <a class="btn ghost" href="/admin/employees">Back to Employees</a>
+  <div class="content-inner availability-page {% if role == 'Shuttle' %}shuttle-availability-page{% endif %}">
+    <section class="availability-page-header">
+      <div>
+        <div class="availability-eyebrow">Employee availability</div>
+        <h1>{{ employee.name }}</h1>
+        <p>{% if role == 'Shuttle' %}Choose the times this employee is available to work each week.{% else %}Choose the shifts this employee is available to work each week.{% endif %}</p>
       </div>
+      <a class="btn ghost availability-back" href="/admin/employees" aria-label="Back to employees">
+        <span aria-hidden="true">&larr;</span> Employees
+      </a>
     </section>
 
     {% if allowed_roles %}
-      <div class="role-tabs" aria-label="Roles for {{ employee.name }}">
-        <div class="role-tabs-hint">Select a role tab to edit availability.</div>
+      <div class="role-tabs availability-role-tabs" aria-label="Roles for {{ employee.name }}">
+        <div class="role-tabs-hint">Editing role</div>
         <div class="role-tabs-list" role="tablist">
           {% for rn in allowed_roles %}
             <a
@@ -27,35 +30,108 @@
       </div>
     {% endif %}
 
-    <form method="post" action="{{ url_for('employee_availability', eid=employee.id, role=role) }}">
-      <div class="table-card">
-        <div class="table-title">Weekly Availability</div>
-        <div class="schedule-table availability" role="table" aria-label="Availability">
-          <div class="row header" role="row" style="grid-template-columns: 160px repeat({{ variants|length }}, minmax(110px, 1fr));">
-            <div class="cell head sticky" role="columnheader">Day</div>
-            {% for v in variants %}
-              <div class="cell head" role="columnheader">{{ v }}</div>
+    <form
+      method="post"
+      action="{{ url_for('employee_availability', eid=employee.id, role=role) }}"
+      id="employee-availability-form"
+    >
+      {% if role == 'Shuttle' %}
+        <section class="availability-quick-update" aria-labelledby="quick-update-title">
+          <label id="quick-update-title" for="availability-command">Update availability with AI</label>
+          <div class="availability-command-wrap">
+            <span class="availability-sparkle" aria-hidden="true">&#10022;</span>
+            <input
+              id="availability-command"
+              type="text"
+              autocomplete="off"
+              placeholder="e.g. Available Wednesday after 3 PM"
+            />
+            <button class="btn primary" id="apply-availability-command" type="button">Apply change</button>
+          </div>
+          <p class="availability-command-help">
+            <span aria-hidden="true">&#9432;</span>
+            Try “Wednesday after 3 PM”, “weekdays from 9 AM to 5 PM”, or “clear weekends”.
+            {% if openai_rule_interpreter_available %}Every instruction is interpreted by {{ openai_rule_interpreter_model }}{% if openai_rule_interpreter_via_proxy %} through CLIProxy{% endif %}.{% endif %}
+          </p>
+          <p class="availability-command-status" id="availability-command-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="shuttle-planner-card" aria-labelledby="weekly-availability-title">
+          <div class="shuttle-planner-heading">
+            <div>
+              <h2 id="weekly-availability-title">Weekly shuttle availability</h2>
+              <p>Drag on an empty day to add a range. Drag a block to move it or use its handles to resize.</p>
+            </div>
+            <div class="availability-legend" aria-label="Availability legend">
+              <span><i class="available" aria-hidden="true"></i> Available</span>
+              <span>45-minute minimum</span>
+            </div>
+          </div>
+
+          <div
+            class="availability-time-grid-scroll"
+            data-day-start="{{ availability_day_start }}"
+            data-day-end="{{ availability_day_end }}"
+            data-ai-url="{{ url_for('interpret_employee_availability', eid=employee.id) }}"
+          >
+            <div class="availability-time-grid" aria-label="Shuttle driver weekly availability">
+              <div class="availability-time-header">
+                <div class="availability-time-corner" aria-hidden="true"></div>
+                {% for d in days %}
+                  <div class="availability-day-header">
+                    <span>{{ d.label }}</span>
+                    <small>{{ 'Weekday' if d.idx < 5 else 'Weekend' }}</small>
+                  </div>
+                {% endfor %}
+              </div>
+              <div class="availability-time-body">
+                <div class="availability-time-axis" aria-hidden="true">
+                  {% for time_label in time_labels %}
+                    <span style="top: {{ ((time_label.minutes - availability_day_start) / 60 * 48)|round(2) }}px">{{ time_label.label }}</span>
+                  {% endfor %}
+                </div>
+                {% for d in days %}
+                  <div class="availability-day-column" data-day="{{ d.idx }}" aria-label="{{ d.label }} availability">
+                    <span class="availability-drag-hint">Drag to add</span>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+          <div id="availability-range-inputs"></div>
+          <script id="initial-availability-ranges" type="application/json">{{ availability_ranges|tojson }}</script>
+        </section>
+      {% else %}
+        <div class="table-card">
+          <div class="table-title">Weekly Availability</div>
+          <div class="schedule-table availability" role="table" aria-label="Availability">
+            <div class="row header" role="row" style="grid-template-columns: 160px repeat({{ variants|length }}, minmax(110px, 1fr));">
+              <div class="cell head sticky" role="columnheader">Day</div>
+              {% for v in variants %}<div class="cell head" role="columnheader">{{ v }}</div>{% endfor %}
+            </div>
+            {% for d in days %}
+              <div class="row" role="row" style="grid-template-columns: 160px repeat({{ variants|length }}, minmax(110px, 1fr));">
+                <div class="cell sticky" role="rowheader">{{ d.label }}</div>
+                {% for v in variants %}
+                  {% set checked = (d.idx, v) in existing %}
+                  <div class="cell" role="cell">
+                    <label class="switch sm" title="Toggle availability">
+                      <input type="checkbox" name="avail" value="{{ d.idx }}::{{ v }}" {% if checked %}checked{% endif %} />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                {% endfor %}
+              </div>
             {% endfor %}
           </div>
-          {% for d in days %}
-            <div class="row" role="row" style="grid-template-columns: 160px repeat({{ variants|length }}, minmax(110px, 1fr));">
-              <div class="cell sticky" role="rowheader">{{ d.label }}</div>
-              {% for v in variants %}
-                {% set checked = (d.idx, v) in existing %}
-                <div class="cell" role="cell">
-                  <label class="switch sm" title="Toggle availability">
-                    <input type="checkbox" name="avail" value="{{ d.idx }}::{{ v }}" {% if checked %}checked{% endif %} />
-                    <span class="slider"></span>
-                  </label>
-                </div>
-              {% endfor %}
-            </div>
-          {% endfor %}
         </div>
-      </div>
+      {% endif %}
 
-      <div class="table-card" style="margin-top:16px;">
-        <div class="table-title">Other Information</div>
+      <details class="availability-details" {% if role != 'Shuttle' %}open{% endif %}>
+        <summary>
+          <span>Employee scheduling details</span>
+          <small>Seniority, preferences and weekly limits</small>
+        </summary>
         <div class="card-body form-grid-2">
           <label>
             <div class="field-label">Seniority</div>
@@ -65,9 +141,7 @@
             <div class="field-label">Preferred Shift</div>
             <select name="preferred_shift" class="shift-select">
               <option value="">-- none --</option>
-              {% for v in variants %}
-                <option value="{{ v }}" {% if employee.preferred_shift == v %}selected{% endif %}>{{ v }}</option>
-              {% endfor %}
+              {% for v in variants %}<option value="{{ v }}" {% if employee.preferred_shift == v %}selected{% endif %}>{{ v }}</option>{% endfor %}
             </select>
           </label>
           <label>
@@ -78,20 +152,28 @@
             <div class="field-label">Max Shifts / Week</div>
             <input class="field-input compact" type="number" min="0" step="1" name="max_shifts_per_week" value="{{ employee.max_shifts_per_week or '' }}" />
           </label>
-          <label style="display:flex;align-items:flex-start;gap:10px;">
-            <input type="checkbox" name="temporary" value="1" {% if employee.temporary %}checked{% endif %} style="margin-top:3px;" />
+          <label class="availability-temporary-field">
+            <input type="checkbox" name="temporary" value="1" {% if employee.temporary %}checked{% endif %} />
             <span>
               <span class="field-label">Temporary employee</span>
               <span class="field-help">Their Excel export row will be left blank.</span>
             </span>
           </label>
         </div>
-      </div>
+      </details>
 
-      <div class="form-actions" style="margin-top:12px;">
-        <button class="btn primary" type="submit">Save</button>
-        <a class="btn ghost" href="/admin/employees">Cancel</a>
+      <div class="availability-save-bar">
+        <span class="availability-unsaved" id="availability-unsaved" aria-live="polite"></span>
+        <button class="btn ghost" id="discard-availability-changes" type="reset">Discard changes</button>
+        <button class="btn primary availability-save-button" type="submit">
+          Save availability
+          <span aria-hidden="true">&#128190;</span>
+        </button>
       </div>
     </form>
   </div>
+
+  {% if role == 'Shuttle' %}
+    <script defer src="{{ url_for('static', filename='js/employee_availability.js', v=ASSET_VERSION) }}"></script>
+  {% endif %}
 {% endblock %}

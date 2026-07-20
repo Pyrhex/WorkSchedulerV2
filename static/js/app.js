@@ -207,6 +207,184 @@ function initUpdatesModal() {
   if (!hasSeenVersion) openModal();
 }
 
+function initExportModal() {
+  const modal = document.getElementById('schedule-export-modal');
+  const trigger = document.getElementById('schedule-export-trigger');
+  const confirmButton = document.getElementById('schedule-export-confirm');
+  const shuttleOnlyInput = document.getElementById('export-shuttle-only');
+  if (!modal || !trigger || !confirmButton || !shuttleOnlyInput) return;
+
+  const dialog = modal.querySelector('.updates-dialog');
+  const closeButtons = modal.querySelectorAll('[data-export-close]');
+  let previouslyFocused = null;
+
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('modal-open');
+    window.setTimeout(() => {
+      modal.hidden = true;
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
+    }, 180);
+  }
+
+  function openModal() {
+    previouslyFocused = document.activeElement;
+    modal.hidden = false;
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
+    window.requestAnimationFrame(() => modal.classList.add('is-open'));
+    if (dialog) dialog.focus();
+  }
+
+  function exportSchedule() {
+    const url = shuttleOnlyInput.checked
+      ? trigger.getAttribute('data-export-shuttle-url')
+      : trigger.getAttribute('data-export-excel-url');
+    if (!url) return;
+    const opened = window.open(url, '_blank', 'noopener');
+    if (opened) {
+      opened.opener = null;
+    }
+    closeModal();
+  }
+
+  trigger.addEventListener('click', openModal);
+  confirmButton.addEventListener('click', exportSchedule);
+  closeButtons.forEach(button => button.addEventListener('click', closeModal));
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeModal();
+  });
+}
+
+function initAiGenerateModal() {
+  const modal = document.getElementById('ai-generate-modal');
+  const trigger = document.getElementById('ai-generate-trigger');
+  if (!modal || !trigger) return;
+
+  const dialog = modal.querySelector('.updates-dialog');
+  const closeButtons = modal.querySelectorAll('[data-ai-generate-close]');
+  let previouslyFocused = null;
+
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('modal-open');
+    window.setTimeout(() => {
+      modal.hidden = true;
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
+    }, 180);
+  }
+
+  function openModal() {
+    previouslyFocused = document.activeElement;
+    modal.hidden = false;
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
+    window.requestAnimationFrame(() => modal.classList.add('is-open'));
+    if (dialog) dialog.focus();
+  }
+
+  trigger.addEventListener('click', openModal);
+  closeButtons.forEach(button => button.addEventListener('click', closeModal));
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeModal();
+  });
+}
+
+function initTimeOffImportModal() {
+  const modal = document.getElementById('timeoff-import-modal');
+  const trigger = document.getElementById('timeoff-import-trigger');
+  const form = document.getElementById('timeoff-import-form');
+  const submitButton = document.getElementById('timeoff-import-submit');
+  const status = document.getElementById('timeoff-import-status');
+  if (!modal || !trigger || !form) return;
+
+  const dialog = modal.querySelector('.updates-dialog');
+  const closeButtons = modal.querySelectorAll('[data-timeoff-import-close]');
+  let previouslyFocused = null;
+
+  function setStatus(message, state = '') {
+    if (!status) return;
+    status.textContent = message || '';
+    status.dataset.state = state;
+  }
+
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('modal-open');
+    window.setTimeout(() => {
+      modal.hidden = true;
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
+    }, 180);
+  }
+
+  function openModal() {
+    previouslyFocused = document.activeElement;
+    setStatus('');
+    modal.hidden = false;
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
+    window.requestAnimationFrame(() => modal.classList.add('is-open'));
+    if (dialog) dialog.focus();
+  }
+
+  trigger.addEventListener('click', openModal);
+  closeButtons.forEach(button => button.addEventListener('click', closeModal));
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeModal();
+  });
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const originalText = submitButton ? submitButton.textContent : '';
+    try {
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = 'Importing…';
+      }
+      setStatus('Reading the workbook with CLIProxy…', 'loading');
+      const res = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (err) {
+        data = null;
+      }
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || 'Import failed');
+      }
+      const warnings = Array.isArray(data.warnings) && data.warnings.length
+        ? ` ${data.warnings.slice(0, 3).join(' ')}`
+        : '';
+      setStatus(`${data.message || 'Import complete.'}${warnings}`, 'success');
+      showToast(data.message || 'Time off imported');
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 1400);
+    } catch (err) {
+      console.error(err);
+      setStatus(err && err.message ? err.message : 'Import failed', 'error');
+      showToast('Time off import failed');
+    } finally {
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = originalText || 'Import';
+      }
+    }
+  });
+}
+
 function isSuggestedCrewValue(value) {
   return typeof value === 'string' && CREW_SUGGESTION_REGEX.test(value);
 }
@@ -743,6 +921,36 @@ function initSelectColors() {
   });
 }
 
+function setUnderstaffReason(header, reason) {
+  if (!header) return;
+  const cleanReason = reason || '';
+  header.setAttribute('data-understaff-reason', cleanReason);
+  const defaultTitle = header.getAttribute('data-default-title') || '';
+  if (header.hasAttribute('data-no-native-title')) {
+    header.removeAttribute('title');
+  } else {
+    header.setAttribute('title', cleanReason || defaultTitle);
+  }
+  const warningIcon = header.querySelector('.coverage-warning-icon');
+  if (!warningIcon) return;
+  if (cleanReason) {
+    warningIcon.setAttribute('data-warning-tooltip', cleanReason);
+    warningIcon.setAttribute('aria-label', cleanReason);
+  } else {
+    warningIcon.removeAttribute('data-warning-tooltip');
+    warningIcon.setAttribute('aria-label', 'Understaffed');
+  }
+}
+
+function breakfastUnderstaffReason(counts) {
+  const dayCounts = counts || {};
+  const reasons = [];
+  if ((dayCounts['5AM–12PM'] || 0) < 1) reasons.push(`Missing Breakfast Bar 5AM-12PM coverage (${dayCounts['5AM–12PM'] || 0}/1)`);
+  if ((dayCounts['6AM–12PM'] || 0) < 1) reasons.push(`Missing Breakfast Bar 6AM-12PM coverage (${dayCounts['6AM–12PM'] || 0}/1)`);
+  if ((dayCounts['7AM–12PM'] || 0) < 1) reasons.push(`Missing Breakfast Bar 7AM-12PM coverage (${dayCounts['7AM–12PM'] || 0}/1)`);
+  return reasons.join('; ');
+}
+
 
 function updateCoverageUI(data) {
   const {
@@ -751,11 +959,16 @@ function updateCoverageUI(data) {
     required,
     variant_counts,
     shuttle_missing,
+    shuttle_missing_reasons,
     bb_missing,
+    bb_counts,
     bb_order_warnings,
     maintenance_missing,
+    maintenance_counts,
     fd_duplicates,
+    coverage_resolved,
   } = data;
+  const hasCoverageResolved = coverage_resolved && typeof coverage_resolved === 'object';
 
   // Update Front Desk headers using FD missing map
   document
@@ -766,11 +979,14 @@ function updateCoverageUI(data) {
       const countSpan = document.querySelector(`.count[data-count-for="${dk}"]`);
       if (countSpan) countSpan.textContent = String(counts?.[dk] || 0);
       h.classList.remove('missing', 'duplicate');
-      if (missing?.[dk]) {
-        h.classList.add('missing');
-      } else if (fd_duplicates?.[dk]) {
+      if (hasCoverageResolved) h.classList.remove('coverage-resolved');
+      if (fd_duplicates?.[dk]) {
         h.classList.add('duplicate');
+        setUnderstaffReason(h, 'Front Desk stagger warning: two employees are assigned the same start time.');
+      } else {
+        setUnderstaffReason(h, '');
       }
+      if (hasCoverageResolved && coverage_resolved?.['Front Desk']?.[dk]) h.classList.add('coverage-resolved');
     });
 
   // Update Shuttle headers using Shuttle missing map
@@ -779,7 +995,16 @@ function updateCoverageUI(data) {
     .forEach(h => {
       const dk = h.getAttribute('data-date');
       if (!dk) return;
-      if (shuttle_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
+      if (hasCoverageResolved) h.classList.remove('coverage-resolved');
+      if (shuttle_missing?.[dk]) {
+        h.classList.add('missing');
+        const reason = shuttle_missing_reasons?.[dk] || '';
+        setUnderstaffReason(h, reason);
+      } else {
+        h.classList.remove('missing');
+        setUnderstaffReason(h, '');
+      }
+      if (hasCoverageResolved && coverage_resolved?.Shuttle?.[dk]) h.classList.add('coverage-resolved');
     });
 
   // Update Breakfast Bar headers using Breakfast missing map
@@ -789,11 +1014,17 @@ function updateCoverageUI(data) {
       const dk = h.getAttribute('data-date');
       if (!dk) return;
       h.classList.remove('missing', 'order-warning');
+      if (hasCoverageResolved) h.classList.remove('coverage-resolved');
       if (bb_missing?.[dk]) {
         h.classList.add('missing');
+        setUnderstaffReason(h, breakfastUnderstaffReason(bb_counts?.[dk]));
       } else if (bb_order_warnings?.[dk]) {
         h.classList.add('order-warning');
+        setUnderstaffReason(h, 'Breakfast Bar order warning: Merve cannot be scheduled earlier than Eurielle.');
+      } else {
+        setUnderstaffReason(h, '');
       }
+      if (hasCoverageResolved && coverage_resolved?.['Breakfast Bar']?.[dk]) h.classList.add('coverage-resolved');
     });
   const breakfastOrderWarning = document.getElementById('breakfast-order-warning');
   if (breakfastOrderWarning) {
@@ -807,10 +1038,18 @@ function updateCoverageUI(data) {
     .forEach(h => {
       const dk = h.getAttribute('data-date');
       if (!dk) return;
-      if (maintenance_missing?.[dk]) h.classList.add('missing'); else h.classList.remove('missing');
+      if (hasCoverageResolved) h.classList.remove('coverage-resolved');
+      if (maintenance_missing?.[dk]) {
+        h.classList.add('missing');
+        setUnderstaffReason(h, `Missing Maintenance coverage (${maintenance_counts?.[dk] || 0}/1)`);
+      } else {
+        h.classList.remove('missing');
+        setUnderstaffReason(h, '');
+      }
+      if (hasCoverageResolved && coverage_resolved?.Maintenance?.[dk]) h.classList.add('coverage-resolved');
     });
 
-  // Missing list with detailed Front Desk variant information
+  // Missing list for Front Desk coverage warnings.
   const list = document.getElementById('missing-list');
   if (list) {
     const missingDates = Object.entries(missing || {}).filter(([, v]) => v).map(([k]) => k);
@@ -822,19 +1061,49 @@ function updateCoverageUI(data) {
         return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
       };
 
-      const missingDetails = missingDates.map(dateKey => {
-        const dateStr = fmt(dateKey);
-        const variants = (variant_counts && variant_counts[dateKey]) || {};
-        const missingVariants = [];
-        if ((variants.AM || 0) < 2) missingVariants.push(`AM (${variants.AM || 0}/2)`);
-        if ((variants.PM || 0) < 2) missingVariants.push(`PM (${variants.PM || 0}/2)`);
-        if ((variants.Audit || 0) < 2) missingVariants.push(`Audit (${variants.Audit || 0}/2)`);
-        return `${dateStr}: ${missingVariants.join(', ')}`;
-      });
+      const missingDetails = missingDates.map(dateKey => fmt(dateKey));
 
       list.innerHTML = `Missing coverage: ${missingDetails.join('; ')}`;
     }
   }
+}
+
+function wireCoverageResolutionButtons() {
+  document.querySelectorAll('.coverage-resolve-trigger').forEach(button => {
+    button.addEventListener('click', async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      const header = button.closest('.cell.head[data-date][data-coverage-section]');
+      if (!header || button.disabled) return;
+      if (!header.classList.contains('missing') && !header.classList.contains('coverage-resolved')) return;
+      const dateKey = header.getAttribute('data-date');
+      const section = header.getAttribute('data-coverage-section');
+      const issue = button.getAttribute('data-issue') || 'understaff';
+      button.disabled = true;
+      try {
+        const res = await fetch('/coverage/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            week_id: window.currentWeekId,
+            section,
+            date: dateKey,
+            issue,
+          }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Unable to resolve coverage warning');
+        updateCoverageUI(data);
+        const isResolved = !!data.coverage_resolved?.[section]?.[dateKey];
+        showToast(isResolved ? 'Coverage warning resolved' : 'Coverage warning restored');
+      } catch (err) {
+        console.error(err);
+        showToast(err && err.message ? err.message : 'Unable to resolve coverage warning');
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
 }
 
 function updateConflictsUI() {
@@ -1099,14 +1368,47 @@ function wireShiftSelects() {
 }
 
 function wireTimeOff() {
+  function matchingTimeOffItems(id) {
+    return document.querySelectorAll(`.timeoff-item[data-id="${id}"]`);
+  }
+
+  function setTimeOffApprovalUI(id, approved) {
+    matchingTimeOffItems(id).forEach(row => {
+      const rowToggle = row.querySelector('.timeoff-toggle');
+      const rowStatus = row.querySelector('[data-status]');
+      if (rowToggle) rowToggle.checked = approved;
+      if (!rowStatus) return;
+      if (approved) {
+        rowStatus.textContent = '✔️';
+        rowStatus.classList.remove('pending');
+        rowStatus.classList.add('approved');
+      } else {
+        rowStatus.textContent = 'pending';
+        rowStatus.classList.remove('approved');
+        rowStatus.classList.add('pending');
+      }
+    });
+  }
+
+  function setTimeOffVacationUI(id, vacation) {
+    matchingTimeOffItems(id).forEach(row => {
+      const rowTypeToggle = row.querySelector('.timeoff-type-toggle');
+      const rowTypePill = row.querySelector('.timeoff-type-pill');
+      if (rowTypeToggle) rowTypeToggle.checked = vacation;
+      if (rowTypePill) {
+        rowTypePill.textContent = vacation ? 'VAC' : 'OFF';
+        rowTypePill.classList.toggle('vacation', vacation);
+      }
+    });
+  }
+
   document.querySelectorAll('.timeoff-item').forEach(item => {
     const id = Number(item.getAttribute('data-id'));
     const toggle = item.querySelector('.timeoff-toggle');
     const typeToggle = item.querySelector('.timeoff-type-toggle');
-    const status = item.querySelector('[data-status]');
     const deleteBtn = item.querySelector('.timeoff-delete');
     
-    toggle.addEventListener('change', async () => {
+    if (toggle) toggle.addEventListener('change', async () => {
       try {
         const res = await fetch('/timeoff/toggle', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1114,15 +1416,7 @@ function wireTimeOff() {
         });
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || 'Failed');
-        if (data.item.approved) {
-          status.textContent = '✔️';
-          status.classList.remove('pending');
-          status.classList.add('approved');
-        } else {
-          status.textContent = 'pending';
-          status.classList.remove('approved');
-          status.classList.add('pending');
-        }
+        setTimeOffApprovalUI(id, !!data.item.approved);
         // Update cells for this employee over the date range
         const name = data.item.name;
         const from = new Date(data.item.from);
@@ -1168,8 +1462,8 @@ function wireTimeOff() {
           const data = await res.json();
           if (!data.ok) throw new Error(data.error || 'Failed');
           
-          // Remove the item from the DOM
-          item.remove();
+          // Remove every visible copy of this request from the calendar/list.
+          matchingTimeOffItems(id).forEach(row => row.remove());
           
           // Update coverage counts
           updateCoverageUI(data);
@@ -1193,6 +1487,7 @@ function wireTimeOff() {
           const data = await res.json();
           if (!data.ok) throw new Error(data.error || 'Failed');
           const payload = data.item;
+          setTimeOffVacationUI(id, !!payload.vacation);
           if (toggle.checked) {
             const name = payload.name;
             const from = new Date(payload.from);
@@ -1772,6 +2067,7 @@ function wireAircrewArrivals() {
       try {
         const data = await postAircrewUpdate('add', carrier, dateKey, { time: timeValue });
         applyAircrewCells(carrier, data.cells);
+        updateCoverageUI(data);
         recordAircrewRecentTime(timeValue);
         showToast('Arrival added');
       } catch (err) {
@@ -1801,6 +2097,7 @@ function wireAircrewArrivals() {
       try {
         const data = await postAircrewUpdate('remove', carrier, dateKey, { time: timeValue });
         applyAircrewCells(carrier, data.cells);
+        updateCoverageUI(data);
         showToast('Arrival removed');
       } catch (err) {
         console.error(err);
@@ -1898,6 +2195,9 @@ function initLiveUpdates() {
           updateShuttleSuggestionForDate(item.date);
           updateShuttleDateSelectClasses(item.date);
         });
+        if (payload.counts) {
+          updateCoverageUI(payload);
+        }
       } else if (payload?.type === 'occupancy') {
         if (payload.week_id && window.currentWeekId && Number(payload.week_id) !== Number(window.currentWeekId)) {
           return;
@@ -1909,6 +2209,11 @@ function initLiveUpdates() {
           cells[item.date] = item.value;
         });
         applyOccupancyCells(cells);
+      } else if (payload?.type === 'coverage_resolution') {
+        if (payload.week_id && window.currentWeekId && Number(payload.week_id) !== Number(window.currentWeekId)) {
+          return;
+        }
+        updateCoverageUI(payload);
       }
     });
   } catch (e) {
@@ -1996,8 +2301,14 @@ function wireAiGenerateSchedule() {
   const form = document.getElementById('ai-generate-form');
   if (!form) return;
   form.addEventListener('submit', (event) => {
+    const selectedSections = Array.from(form.querySelectorAll('input[name="ai_sections"]:checked'));
+    if (selectedSections.length === 0) {
+      event.preventDefault();
+      showToast('Choose at least one department to generate');
+      return;
+    }
     const confirmed = confirm(
-      'AI Generate will fill open dropdowns for this week using schedule patterns from 2026 onward. ' +
+      'AI Generate will fill open dropdowns for the selected departments using schedule patterns from 2026 onward. ' +
       'Every dropdown already set to a value other than "-" will remain unchanged. Continue?'
     );
     if (!confirmed) event.preventDefault();
@@ -2230,13 +2541,13 @@ function wireEmployeeSecondaryRoles() {
 
 function templateSlotStatusLabel(slotData) {
   if (!slotData || !slotData.has_data) {
-    return 'Empty slot';
+    return 'Empty';
   }
   const weekLabel = slotData.saved_week_label || 'week';
   if (slotData.updated_label) {
-    return `Saved from ${weekLabel} • ${slotData.updated_label}`;
+    return `${weekLabel} • ${slotData.updated_label}`;
   }
-  return `Saved from ${weekLabel}`;
+  return weekLabel;
 }
 
 function applyTemplateSlotState(slotEl, slotData) {
@@ -2569,6 +2880,10 @@ window.confirmGenerateSchedule = confirmGenerateSchedule;
 document.addEventListener('DOMContentLoaded', () => {
   initThemeToggle();
   initUpdatesModal();
+  initExportModal();
+  initAiGenerateModal();
+  initTimeOffImportModal();
+  wireCoverageResolutionButtons();
   wireShiftSelects();
   initShuttleSuggestions();
   wireTimeOff();

@@ -1,90 +1,206 @@
 {% extends "base.html" %}
 
-{% block content %}
-  <div class="content-inner">
-    <section class="schedule-header">
-    </section>
-
-    <!-- New Request Form -->
-    <div class="table-card page-card page-card-sm" style="margin-bottom: 24px;" id="new-request-form">
-      <div class="table-title">New Time Off Request</div>
-      <div class="card-body">
-        <form method="post" action="/timeoff/new" id="timeoff-form">
-          <div class="stack-md">
-            <label>
-              <div class="field-label">Employee Name</div>
-              <input class="field-input" name="name" list="employee-list" required placeholder="Select or type name" />
-              <datalist id="employee-list">
-                {% for e in employees %}
-                  <option value="{{ e.name }}">{{ e.name }}</option>
-                {% endfor %}
-              </datalist>
-            </label>
-            <label>
-              <div class="field-label">Role</div>
-              <select class="field-input" name="role" required>
-                {% for sec in sections %}
-                  <option value="{{ sec.name }}">{{ sec.name }}</option>
-                {% endfor %}
-              </select>
-            </label>
-            <div class="form-grid-2">
-              <label>
-                <div class="field-label">From</div>
-                <input class="field-input" type="date" name="from" required />
-              </label>
-              <label>
-                <div class="field-label">To</div>
-                <input class="field-input" type="date" name="to" required />
-              </label>
-            </div>
-            <div class="inline-toggle-group" style="margin-top:4px;">
-              <label class="switch" title="Mark as approved">
-                <input type="checkbox" name="approved" checked>
-                <span class="slider"></span>
-              </label>
-              <span class="toggle-label" style="font-size:12px; color:#475569;">Approved</span>
-              <label class="switch" title="Mark as vacation" style="margin-left:8px;">
-                <input type="checkbox" name="vacation">
-                <span class="slider"></span>
-              </label>
-              <span class="toggle-label" style="font-size:12px; color:#475569;">Vacation</span>
-            </div>
-            <div class="form-actions">
-              <button class="btn primary" type="submit">Create</button>
-            </div>
-          </div>
-        </form>
+{% macro request_item(item, compact=False) %}
+  <li class="timeoff-item {{ 'timeoff-calendar-request' if compact else '' }}" data-id="{{ item.id }}">
+    <div class="info">
+      <div class="name">
+        {{ item.name }}
+        <span class="role">({{ item.role }})</span>
+        {% if item.vacation %}
+          <span class="timeoff-type-pill vacation">VAC</span>
+        {% else %}
+          <span class="timeoff-type-pill">OFF</span>
+        {% endif %}
+      </div>
+      <div class="dates">{{ item.label }}
+        <span class="status {{ 'approved' if item.approved else 'pending' }}" data-status>{{ '✔️' if item.approved else 'pending' }}</span>
       </div>
     </div>
+    <div class="actions">
+      <label class="switch" title="Toggle Approved">
+        <input type="checkbox" class="timeoff-toggle" {% if item.approved %}checked{% endif %} />
+        <span class="slider"></span>
+      </label>
+      {% if not compact %}
+        <span class="toggle-label">Approved</span>
+      {% endif %}
+      <label class="switch" title="Toggle Vacation">
+        <input type="checkbox" class="timeoff-type-toggle" {% if item.vacation %}checked{% endif %} />
+        <span class="slider"></span>
+      </label>
+      {% if not compact %}
+        <span class="toggle-label">Vacation</span>
+      {% endif %}
+      <button class="timeoff-delete" data-id="{{ item.id }}" type="button" title="Delete request" aria-label="Delete {{ item.name }}">×</button>
+    </div>
+  </li>
+{% endmacro %}
 
-    <div class="table-card page-card" style="max-width: 700px;">
-      <div class="table-title">Requests</div>
-      <div class="sidebar-inner">
-        {% macro request_item(item) %}
-          <li class="timeoff-item" data-id="{{ item.id }}">
-            <div class="info">
-              <div class="name">{{ item.name }} <span class="role">({{ item.role }})</span></div>
-              <div class="dates">{{ item.label }}
-                <span class="status {{ 'approved' if item.approved else 'pending' }}" data-status>{{ '✔️' if item.approved else 'pending' }}</span>
+{% block content %}
+  <div class="content-inner timeoff-page">
+    <section class="timeoff-hero">
+      <div>
+        <div class="updates-eyebrow">Time Off</div>
+        <h1>{{ calendar_month_label }}</h1>
+        <p>Monthly request calendar, laid out like the vacation workbook.</p>
+      </div>
+      <div class="timeoff-hero-actions">
+        <a class="btn ghost" href="{{ previous_month_url }}">← Previous</a>
+        <a class="btn ghost" href="{{ current_month_url }}">This Month</a>
+        <a class="btn ghost" href="{{ next_month_url }}">Next →</a>
+        <form class="timeoff-month-jump" method="get" action="/timeoff">
+          <input class="field-input compact" type="month" name="month" value="{{ calendar_month_value }}" aria-label="Choose month">
+          <button class="btn primary" type="submit">Go</button>
+        </form>
+      </div>
+    </section>
+
+    <div class="timeoff-layout">
+      <section class="table-card page-card timeoff-calendar-card">
+        <div class="table-title timeoff-title-row">
+          <span>Calendar</span>
+          <button class="btn ghost" type="button" id="timeoff-import-trigger">Import Excel</button>
+        </div>
+        <div class="timeoff-calendar">
+          <div class="timeoff-weekday">Sunday</div>
+          <div class="timeoff-weekday">Monday</div>
+          <div class="timeoff-weekday">Tuesday</div>
+          <div class="timeoff-weekday">Wednesday</div>
+          <div class="timeoff-weekday">Thursday</div>
+          <div class="timeoff-weekday">Friday</div>
+          <div class="timeoff-weekday">Saturday</div>
+          {% for week in calendar_weeks %}
+            {% for day in week %}
+              <article class="timeoff-day {{ '' if day.in_month else 'outside-month' }} {{ 'today' if day.is_today else '' }}" data-date="{{ day.key }}">
+                <header class="timeoff-day-header">
+                  <span class="timeoff-day-number">{{ day.day }}</span>
+                  {% if day.is_today %}
+                    <span class="timeoff-today-pill">Today</span>
+                  {% endif %}
+                </header>
+                {% if day.requests %}
+                  <ul class="timeoff-day-list">
+                    {% for item in day.requests %}
+                      {{ request_item(item, True) }}
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  <div class="timeoff-day-empty">—</div>
+                {% endif %}
+              </article>
+            {% endfor %}
+          {% endfor %}
+        </div>
+      </section>
+
+      <aside class="timeoff-side-stack">
+        <section class="table-card page-card page-card-sm" id="new-request-form">
+          <div class="table-title">New Time Off Request</div>
+          <div class="card-body">
+            <form method="post" action="/timeoff/new" id="timeoff-form">
+              <div class="stack-md">
+                <label>
+                  <div class="field-label">Employee Name</div>
+                  <input class="field-input" name="name" list="employee-list" required placeholder="Select or type name" />
+                  <datalist id="employee-list">
+                    {% for e in employees %}
+                      <option value="{{ e.name }}">{{ e.name }}</option>
+                    {% endfor %}
+                  </datalist>
+                </label>
+                <label>
+                  <div class="field-label">Role</div>
+                  <select class="field-input" name="role" required>
+                    {% for sec in sections %}
+                      <option value="{{ sec.name }}">{{ sec.name }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <div class="form-grid-2">
+                  <label>
+                    <div class="field-label">From</div>
+                    <input class="field-input" type="date" name="from" required />
+                  </label>
+                  <label>
+                    <div class="field-label">To</div>
+                    <input class="field-input" type="date" name="to" required />
+                  </label>
+                </div>
+                <div class="inline-toggle-group">
+                  <label class="switch" title="Mark as approved">
+                    <input type="checkbox" name="approved" checked>
+                    <span class="slider"></span>
+                  </label>
+                  <span class="toggle-label">Approved</span>
+                  <label class="switch" title="Mark as vacation">
+                    <input type="checkbox" name="vacation">
+                    <span class="slider"></span>
+                  </label>
+                  <span class="toggle-label">Vacation</span>
+                </div>
+                <div class="form-actions">
+                  <button class="btn primary" type="submit">Create</button>
+                </div>
               </div>
-            </div>
-            <div class="actions" style="display:flex; align-items:center; gap:8px;">
-              <label class="switch" title="Toggle Approved">
-                <input type="checkbox" class="timeoff-toggle" {% if item.approved %}checked{% endif %} />
-                <span class="slider"></span>
-              </label>
-              <span class="toggle-label" style="font-size:12px; color:#475569;">Approved</span>
-              <label class="switch" title="Toggle Vacation" style="margin-left:8px;">
-                <input type="checkbox" class="timeoff-type-toggle" {% if item.vacation %}checked{% endif %} />
-                <span class="slider"></span>
-              </label>
-              <span class="toggle-label" style="font-size:12px; color:#475569;">Vacation</span>
-              <button class="timeoff-delete" data-id="{{ item.id }}" type="button" title="Delete request" aria-label="Delete {{ item.name }}">×</button>
-            </div>
-          </li>
-        {% endmacro %}
+            </form>
+          </div>
+        </section>
 
+        <section class="table-card page-card page-card-sm">
+          <div class="table-title">Legend</div>
+          <div class="timeoff-legend">
+            <span><span class="timeoff-type-pill vacation">VAC</span> Vacation</span>
+            <span><span class="timeoff-type-pill">OFF</span> Time off</span>
+            <span><span class="status approved">✔️</span> Approved</span>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <div
+      id="timeoff-import-modal"
+      class="updates-modal timeoff-import-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="timeoff-import-modal-title"
+      aria-hidden="true"
+      hidden
+    >
+      <button type="button" class="updates-backdrop" data-timeoff-import-close aria-label="Close time off import"></button>
+      <section class="updates-dialog timeoff-import-dialog" tabindex="-1">
+        <form method="post" action="/timeoff/import" enctype="multipart/form-data" id="timeoff-import-form">
+          <header class="updates-header">
+            <div>
+              <span class="updates-eyebrow">CLIProxy</span>
+              <h2 id="timeoff-import-modal-title">Import time off requests</h2>
+            </div>
+            <button type="button" class="updates-close" data-timeoff-import-close aria-label="Close time off import">&times;</button>
+          </header>
+          <div class="updates-body timeoff-import-body">
+            <p class="timeoff-import-copy">
+              Choose the month, upload the Excel file, and CLIProxy will read the messy request notes into approved time off requests.
+            </p>
+            <label>
+              <div class="field-label">Month</div>
+              <input class="field-input" type="month" name="month" value="{{ import_month_default }}" required>
+            </label>
+            <label>
+              <div class="field-label">Excel file</div>
+              <input class="field-input" type="file" name="file" accept=".xlsx,.xlsm" required>
+            </label>
+            <div class="timeoff-import-status" id="timeoff-import-status" role="status" aria-live="polite"></div>
+          </div>
+          <footer class="updates-footer">
+            <button type="button" class="btn ghost" data-timeoff-import-close>Cancel</button>
+            <button type="submit" class="btn primary" id="timeoff-import-submit">Import</button>
+          </footer>
+        </form>
+      </section>
+    </div>
+
+    <section class="table-card page-card timeoff-all-requests">
+      <div class="table-title">All Requests</div>
+      <div class="sidebar-inner">
         <section class="timeoff-request-section">
           <div class="timeoff-section-title">Upcoming</div>
           {% if time_off %}
@@ -111,6 +227,6 @@
           {% endif %}
         </section>
       </div>
-    </div>
+    </section>
   </div>
 {% endblock %}

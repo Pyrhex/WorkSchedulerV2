@@ -6,7 +6,18 @@
   window.currentWeekId = {{ meta.week_id|tojson }};
 </script>
   <div class="content-inner full-width">
-    <div class="banner success">{{ meta.success_banner }}</div>
+    {% if meta.success_banner %}
+      <div class="banner success">{{ meta.success_banner }}</div>
+    {% endif %}
+    {% if meta.generate_undo_token %}
+      <div class="ai-undo-bar" data-undo-deadline="{{ meta.generate_undo_deadline_ms }}">
+        <span>You can undo this generated 4-week schedule for the next <span data-undo-seconds>{{ meta.generate_undo_seconds }}</span> seconds.</span>
+        <form action="/week/{{ meta.week_id }}/generate/undo" method="post">
+          <input type="hidden" name="undo_token" value="{{ meta.generate_undo_token }}">
+          <button class="btn secondary" type="submit">Undo Generate</button>
+        </form>
+      </div>
+    {% endif %}
     {% if meta.ai_undo_token %}
       <div class="ai-undo-bar">
         <span>You can undo this AI generation for the next {{ meta.ai_undo_seconds }} seconds.</span>
@@ -20,18 +31,22 @@
     <section class="schedule-header">
       <div class="title">Schedule: {{ meta.range_label }}</div>
       <div class="actions">
-        <form action="{% if meta.week_id %}/export/excel/{{ meta.week_id }}{% else %}/export/excel/1{% endif %}" method="get" target="_blank" style="display:inline-block;">
-          <button class="btn secondary" type="submit">Export to Excel</button>
-        </form>
-        <form action="{% if meta.week_id %}/export/shuttle-aircrew/{{ meta.week_id }}{% else %}/export/shuttle-aircrew/1{% endif %}" method="get" target="_blank" style="display:inline-block;">
-          <button class="btn secondary" type="submit">Export Shuttle/Air Crew</button>
-        </form>
+        <button class="btn secondary"
+                type="button"
+                id="schedule-export-trigger"
+                data-export-excel-url="{% if meta.week_id %}/export/excel/{{ meta.week_id }}{% else %}/export/excel/1{% endif %}"
+                data-export-shuttle-url="{% if meta.week_id %}/export/shuttle-aircrew/{{ meta.week_id }}{% else %}/export/shuttle-aircrew/1{% endif %}">
+          Export
+        </button>
         <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/manager-meals{% else %}/week/1/manager-meals{% endif %}" method="get" style="display:inline-block;">
           <button class="btn purple" type="submit">Manager Meal List</button>
         </form>
         <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/generate{% else %}/generate{% endif %}" method="post" id="generate-form">
           <button class="btn primary" type="submit">Generate New Schedule</button>
         </form>
+        {% if meta.week_id %}
+          <button class="btn ai" type="button" id="ai-generate-trigger">AI Generate</button>
+        {% endif %}
         <form action="{% if meta.week_id %}/week/{{ meta.week_id }}/delete{% else %}/delete{% endif %}" method="post" onsubmit="return confirm('Delete this schedule?');">
           <button class="btn danger" type="submit">Delete This Schedule</button>
         </form>
@@ -71,31 +86,114 @@
       <div class="subtitle">{{ meta.fd_note }}</div>
     </section>
 
+    <div
+      id="schedule-export-modal"
+      class="updates-modal export-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="schedule-export-modal-title"
+      aria-hidden="true"
+      hidden
+    >
+      <button type="button" class="updates-backdrop" data-export-close aria-label="Close export options"></button>
+      <section class="updates-dialog export-dialog" tabindex="-1">
+        <header class="updates-header">
+          <div>
+            <span class="updates-eyebrow">Export</span>
+            <h2 id="schedule-export-modal-title">Schedule export</h2>
+          </div>
+          <button type="button" class="updates-close" data-export-close aria-label="Close export options">&times;</button>
+        </header>
+        <div class="updates-body export-options-body">
+          <label class="export-toggle-option" for="export-shuttle-only">
+            <span>
+              <strong>Shuttle only</strong>
+              <small>Export just shuttle drivers and air crew.</small>
+            </span>
+            <input type="checkbox" id="export-shuttle-only">
+            <span class="export-toggle-control" aria-hidden="true"></span>
+          </label>
+        </div>
+        <footer class="updates-footer">
+          <button type="button" class="btn ghost" data-export-close>Cancel</button>
+          <button type="button" class="btn primary" id="schedule-export-confirm">Export</button>
+        </footer>
+      </section>
+    </div>
+
     {% if meta.week_id %}
-    <section class="ai-generator-panel" aria-labelledby="ai-generator-title">
-      <form action="/week/{{ meta.week_id }}/ai-generate" method="post" id="ai-generate-form">
-        <div class="ai-generator-copy">
-          <label id="ai-generator-title" for="ai-instructions">AI scheduling preferences</label>
-          <span>Write naturally. Typed rules take priority over past schedules and apply only to this generation.</span>
-        </div>
-        <textarea id="ai-instructions"
-                  name="ai_instructions"
-                  maxlength="2000"
-                  rows="3"
-                  placeholder="Example: Tristan has been working a lot lately, so when he and Oscar are both suitable, choose Oscar. Keep Abdi on his usual 10:15 audit start and give Cindy no more than four shifts."></textarea>
-        <div class="ai-generator-actions">
-          <span>
-            {% if openai_rule_interpreter_available %}
-              Natural-language interpretation enabled ({{ openai_rule_interpreter_model }}{% if openai_rule_interpreter_via_proxy %} via CLIProxy{% endif %}).
-            {% else %}
-              Limited parser active—add OPENAI_API_KEY to enable full natural-language understanding.
-            {% endif %}
-            Existing dropdown selections remain locked.
-          </span>
-          <button class="btn ai" type="submit">AI Generate</button>
-        </div>
-      </form>
-    </section>
+    <div
+      id="ai-generate-modal"
+      class="updates-modal ai-generate-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ai-generate-modal-title"
+      aria-hidden="true"
+      hidden
+    >
+      <button type="button" class="updates-backdrop" data-ai-generate-close aria-label="Close AI generate options"></button>
+      <section class="updates-dialog ai-generate-dialog" tabindex="-1">
+        <form action="/week/{{ meta.week_id }}/ai-generate" method="post" id="ai-generate-form">
+          <input type="hidden" name="ai_section_filter" value="1">
+          <header class="updates-header">
+            <div>
+              <span class="updates-eyebrow">AI</span>
+              <h2 id="ai-generate-modal-title">AI Generate</h2>
+            </div>
+            <button type="button" class="updates-close" data-ai-generate-close aria-label="Close AI generate options">&times;</button>
+          </header>
+          <div class="updates-body ai-generate-body">
+            <div class="ai-generator-copy">
+              <label id="ai-generator-title" for="ai-instructions">Scheduling preferences</label>
+              <span>Write naturally. Typed rules take priority over past schedules and apply only to this generation.</span>
+            </div>
+            <textarea id="ai-instructions"
+                      name="ai_instructions"
+                      maxlength="2000"
+                      rows="4"
+                      placeholder="Example: Tristan has been working a lot lately, so when he and Oscar are both suitable, choose Oscar. Keep Abdi on his usual 10:15 audit start and give Cindy no more than four shifts."></textarea>
+            <div class="ai-section-toggles" aria-label="Departments to generate">
+              <label class="export-toggle-option" for="ai-section-front-desk">
+                <span>
+                  <strong>Front Desk</strong>
+                  <small>Generate AM, PM, and Audit coverage.</small>
+                </span>
+                <input type="checkbox" id="ai-section-front-desk" name="ai_sections" value="Front Desk" checked>
+                <span class="export-toggle-control" aria-hidden="true"></span>
+              </label>
+              <label class="export-toggle-option" for="ai-section-shuttle">
+                <span>
+                  <strong>Shuttle</strong>
+                  <small>Generate AM, Midday, PM, and Crew shifts.</small>
+                </span>
+                <input type="checkbox" id="ai-section-shuttle" name="ai_sections" value="Shuttle" checked>
+                <span class="export-toggle-control" aria-hidden="true"></span>
+              </label>
+              <label class="export-toggle-option" for="ai-section-breakfast">
+                <span>
+                  <strong>Breakfast Bar</strong>
+                  <small>Generate 5AM, 6AM, and 7AM coverage.</small>
+                </span>
+                <input type="checkbox" id="ai-section-breakfast" name="ai_sections" value="Breakfast Bar" checked>
+                <span class="export-toggle-control" aria-hidden="true"></span>
+              </label>
+            </div>
+            <p class="ai-generator-note">
+              {% if openai_rule_interpreter_available %}
+                Natural-language interpretation enabled ({{ openai_rule_interpreter_model }}{% if openai_rule_interpreter_via_proxy %} via CLIProxy{% endif %}).
+              {% else %}
+                Limited parser active; add OPENAI_API_KEY to enable full natural-language understanding.
+              {% endif %}
+              Existing dropdown selections remain locked.
+            </p>
+          </div>
+          <footer class="updates-footer">
+            <button type="button" class="btn ghost" data-ai-generate-close>Cancel</button>
+            <button class="btn ai" type="submit">AI Generate</button>
+          </footer>
+        </form>
+      </section>
+    </div>
     {% endif %}
 
     <section class="week-nav">
@@ -105,11 +203,10 @@
     </section>
 
     {% if schedule_templates %}
-    <section class="template-panel" aria-label="Schedule Templates">
+    <section class="template-panel" aria-label="Last Saved">
       <div class="template-panel-header">
         <div>
-          <div class="template-panel-title">Schedule Templates</div>
-          <div class="template-panel-subtitle">Save the current week and drop it onto any other week.</div>
+          <div class="template-panel-title">Last Saved</div>
         </div>
         <div class="template-panel-note">{{ schedule_templates|length }} slots</div>
       </div>
@@ -121,9 +218,9 @@
                 <div class="template-slot-name">{{ slot.name }}</div>
                 <div class="template-slot-status" data-slot-status>
                   {% if slot.has_data %}
-                    Saved from {{ slot.saved_week_label or 'week' }}{% if slot.updated_label %} • {{ slot.updated_label }}{% endif %}
+                    {{ slot.saved_week_label or 'Saved week' }}{% if slot.updated_label %} • {{ slot.updated_label }}{% endif %}
                   {% else %}
-                    Empty slot
+                    Empty
                   {% endif %}
                 </div>
               </div>
@@ -147,8 +244,20 @@
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Employees</div>
             {% for d in week.dates %}
-              <div class="cell head {% if missing[d.key] %}missing{% elif fd_duplicates[d.key] %}duplicate{% endif %}" role="columnheader" data-date="{{ d.key }}" title="{{ d.label_long }}">
+              {% set fd_resolved = coverage_resolved.get('Front Desk', {}).get(d.key) if coverage_resolved is defined else false %}
+              {% set fd_warning_reason = 'Front Desk stagger warning: two employees are assigned the same start time.' if fd_duplicates[d.key] else '' %}
+              <div class="cell head {% if fd_duplicates[d.key] %}duplicate{% endif %} {% if fd_resolved %}coverage-resolved{% endif %}" role="columnheader" data-date="{{ d.key }}" data-coverage-section="Front Desk" data-default-title="{{ d.label_long }}" data-understaff-reason="{{ fd_warning_reason }}" title="{{ fd_warning_reason or d.label_long }}">
                 <div class="head-date">{{ d.label_short }}</div>
+                <button type="button" class="coverage-resolve-trigger" data-issue="understaff" aria-label="Mark understaffing resolved" title="Mark understaffing resolved">
+                  <span aria-hidden="true">&#10003;</span>
+                </button>
+                <span class="coverage-warning-icon" data-warning-tooltip="{{ fd_warning_reason }}" aria-label="{{ fd_warning_reason }}" role="img" tabindex="0">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3.2 22 20.6H2L12 3.2Z"></path>
+                    <path d="M12 8.4v6.1"></path>
+                    <path d="M12 17.7h.01"></path>
+                  </svg>
+                </span>
               </div>
             {% endfor %}
           </div>
@@ -250,7 +359,21 @@
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Employees</div>
             {% for d in week.dates %}
-              <div class="cell head {% if shuttle_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+              {% set shuttle_reason = shuttle_missing_reasons.get(d.key) if shuttle_missing_reasons is defined else '' %}
+              {% set shuttle_resolved = coverage_resolved.get('Shuttle', {}).get(d.key) if coverage_resolved is defined else false %}
+              <div class="cell head {% if shuttle_missing[d.key] %}missing{% endif %} {% if shuttle_resolved %}coverage-resolved{% endif %}" data-date="{{ d.key }}" data-coverage-section="Shuttle" data-default-title="{{ d.label_long }}" data-no-native-title data-understaff-reason="{{ shuttle_reason }}" role="columnheader">
+                <div class="head-date">{{ d.label_short }}</div>
+                <button type="button" class="coverage-resolve-trigger" data-issue="understaff" aria-label="Mark understaffing resolved" title="Mark understaffing resolved">
+                  <span aria-hidden="true">&#10003;</span>
+                </button>
+                <span class="coverage-warning-icon" data-warning-tooltip="{{ shuttle_reason }}" aria-label="{{ shuttle_reason }}" role="img" tabindex="0">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3.2 22 20.6H2L12 3.2Z"></path>
+                    <path d="M12 8.4v6.1"></path>
+                    <path d="M12 17.7h.01"></path>
+                  </svg>
+                </span>
+              </div>
             {% endfor %}
           </div>
           {% for emp in shuttle.employees %}
@@ -402,7 +525,29 @@
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Employees</div>
             {% for d in week.dates %}
-              <div class="cell head {% if bb_missing[d.key] %}missing{% elif bb_order_warnings[d.key] %}order-warning{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+              {% set bb_resolved = coverage_resolved.get('Breakfast Bar', {}).get(d.key) if coverage_resolved is defined else false %}
+              {% set bb_reason_parts = [] %}
+              {% if bb_counts is defined %}
+                {% set bb_day_counts = bb_counts.get(d.key, {}) %}
+                {% if bb_day_counts.get('5AM–12PM', 0) < 1 %}{% set _ = bb_reason_parts.append('Missing Breakfast Bar 5AM-12PM coverage (' ~ bb_day_counts.get('5AM–12PM', 0) ~ '/1)') %}{% endif %}
+                {% if bb_day_counts.get('6AM–12PM', 0) < 1 %}{% set _ = bb_reason_parts.append('Missing Breakfast Bar 6AM-12PM coverage (' ~ bb_day_counts.get('6AM–12PM', 0) ~ '/1)') %}{% endif %}
+                {% if bb_day_counts.get('7AM–12PM', 0) < 1 %}{% set _ = bb_reason_parts.append('Missing Breakfast Bar 7AM-12PM coverage (' ~ bb_day_counts.get('7AM–12PM', 0) ~ '/1)') %}{% endif %}
+              {% endif %}
+              {% set bb_reason = bb_reason_parts|join('; ') %}
+              {% set bb_warning_reason = bb_reason if bb_missing[d.key] else ('Breakfast Bar order warning: Merve cannot be scheduled earlier than Eurielle.' if bb_order_warnings[d.key] else '') %}
+              <div class="cell head {% if bb_missing[d.key] %}missing{% elif bb_order_warnings[d.key] %}order-warning{% endif %} {% if bb_resolved %}coverage-resolved{% endif %}" data-date="{{ d.key }}" data-coverage-section="Breakfast Bar" data-default-title="{{ d.label_long }}" data-understaff-reason="{{ bb_warning_reason }}" role="columnheader" title="{{ bb_warning_reason or d.label_long }}">
+                <div class="head-date">{{ d.label_short }}</div>
+                <button type="button" class="coverage-resolve-trigger" data-issue="understaff" aria-label="Mark understaffing resolved" title="Mark understaffing resolved">
+                  <span aria-hidden="true">&#10003;</span>
+                </button>
+                <span class="coverage-warning-icon" data-warning-tooltip="{{ bb_warning_reason }}" aria-label="{{ bb_warning_reason }}" role="img" tabindex="0">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3.2 22 20.6H2L12 3.2Z"></path>
+                    <path d="M12 8.4v6.1"></path>
+                    <path d="M12 17.7h.01"></path>
+                  </svg>
+                </span>
+              </div>
             {% endfor %}
           </div>
           {% for emp in breakfast.employees %}
@@ -446,7 +591,22 @@
           <div class="row header" role="row">
             <div class="cell head sticky" role="columnheader">Employees</div>
             {% for d in week.dates %}
-              <div class="cell head {% if maintenance_missing[d.key] %}missing{% endif %}" data-date="{{ d.key }}" role="columnheader" title="{{ d.label_long }}">{{ d.label_short }}</div>
+              {% set maintenance_resolved = coverage_resolved.get('Maintenance', {}).get(d.key) if coverage_resolved is defined else false %}
+              {% set maintenance_count = maintenance_counts.get(d.key, 0) if maintenance_counts is defined else 0 %}
+              {% set maintenance_reason = 'Missing Maintenance coverage (' ~ maintenance_count ~ '/1)' %}
+              <div class="cell head {% if maintenance_missing[d.key] %}missing{% endif %} {% if maintenance_resolved %}coverage-resolved{% endif %}" data-date="{{ d.key }}" data-coverage-section="Maintenance" data-default-title="{{ d.label_long }}" data-understaff-reason="{{ maintenance_reason }}" role="columnheader" title="{{ maintenance_reason if maintenance_missing[d.key] else d.label_long }}">
+                <div class="head-date">{{ d.label_short }}</div>
+                <button type="button" class="coverage-resolve-trigger" data-issue="understaff" aria-label="Mark understaffing resolved" title="Mark understaffing resolved">
+                  <span aria-hidden="true">&#10003;</span>
+                </button>
+                <span class="coverage-warning-icon" data-warning-tooltip="{{ maintenance_reason }}" aria-label="{{ maintenance_reason }}" role="img" tabindex="0">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3.2 22 20.6H2L12 3.2Z"></path>
+                    <path d="M12 8.4v6.1"></path>
+                    <path d="M12 17.7h.01"></path>
+                  </svg>
+                </span>
+              </div>
             {% endfor %}
           </div>
           {% for emp in maintenance.employees %}

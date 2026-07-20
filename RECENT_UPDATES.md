@@ -1,3 +1,13 @@
+# July 9th, 2026
+- Added an understaffing warning icon on schedule date headers; hover it to see the reason for the understaffing.
+
+# July 7th, 2026
+- Added a toggleable checkmark on understaffed date headers so managers can mark a coverage issue resolved, then click it again to restore the highlight if needed.
+- Shuttle crew coverage now checks whether a crew driver is active during airline crew pickup times, and hovering an understaffed Shuttle date shows the reason for the highlight.
+- Combined schedule exports into one Export popup with a Shuttle only toggle.
+- Added automatic hourly database backups and keeps only the last 24 hours of backup files.
+- Added an Undo Generate option for regular 4-week schedule generation.
+
 # June 28th, 2026
 - Added AI schedule generation (work in progress). Use at your own risk.
 
@@ -20,4 +30,3 @@
 - Added a **recent updates popup** so everyone can quickly see what changed.
 - Updates can now be reopened from the **Updates** button in the top navigation.
 - Added military time support for custom time shifts
-

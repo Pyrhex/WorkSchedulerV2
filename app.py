@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import io
 import hashlib
+import fcntl
 import json
 import math
 import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
 from copy import copy as copy_style
-from threading import RLock
+from threading import RLock, Thread
 from functools import lru_cache
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
@@ -42,7 +44,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-ASSET_VERSION = os.getenv("ASSET_VERSION", "20260623f")
+ASSET_VERSION = os.getenv("ASSET_VERSION", "20260713f")
 app.jinja_env.globals["ASSET_VERSION"] = ASSET_VERSION
 
 BASE_DIR = Path(app.root_path)
@@ -51,6 +53,11 @@ SHUTTLE_TEMPLATE_FILENAME = BASE_DIR / "ShuttleTemplateEmptySingle.xlsx"
 SCHEDULE_TEMPLATE_ARCHIVE_DIR = BASE_DIR / "old_schedule_templates"
 SCHEDULE_TEMPLATE_ALLOWED_SUFFIXES = {".xlsx"}
 RECENT_UPDATES_FILENAME = BASE_DIR / "RECENT_UPDATES.md"
+DATABASE_BACKUP_DIR = BASE_DIR / "database_backups"
+DATABASE_BACKUP_INTERVAL_SECONDS = int(os.getenv("DATABASE_BACKUP_INTERVAL_SECONDS", "3600"))
+DATABASE_BACKUP_RETENTION_HOURS = int(os.getenv("DATABASE_BACKUP_RETENTION_HOURS", "24"))
+DATABASE_BACKUP_ENABLED = (os.getenv("DATABASE_BACKUP_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"})
+_DATABASE_BACKUP_LOCK_FILE = None
 
 
 DISCORD_IMAGE_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -124,6 +131,17 @@ APP_ENV = (os.getenv("APP_ENV") or "production").strip().lower()
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip() or _default_database_url(APP_ENV)
 app.config["APP_ENV"] = APP_ENV
 app.config["DATABASE_URL"] = DATABASE_URL
+
+
+def _using_test_database() -> bool:
+    if _normalize_database_choice(app.config.get("APP_ENV")) == "development":
+        return True
+    database_url = (app.config.get("DATABASE_URL") or DATABASE_URL or "").strip()
+    parsed = urlparse(database_url)
+    if parsed.scheme == "sqlite":
+        return Path(parsed.path).name == DATABASE_CHOICES["development"]["filename"]
+    return False
+
 
 class DiscordImageSendError(RuntimeError):
     """Raised when the Discord channel image API reports an error."""
@@ -255,6 +273,8 @@ def _send_discord_channel_image(
 
 def _post_discord_message(content: str, *, title: Optional[str] = None, color: Optional[int] = None) -> None:
     """Send an embed to the configured Discord webhook, if available."""
+    if _using_test_database():
+        return
     url = os.getenv("DISCORD_WEBHOOK_URL")
     if not url or not content:
         return
@@ -285,13 +305,21 @@ def _notify_schedule_change(
     *,
     detail: Optional[str] = None,
 ) -> None:
+    formatted_date = shift_date.strftime("%A, %Y-%m-%d")
     message = (
         "Schedule update: "
-        f"{employee} assigned to {value or 'Set'} on {shift_date.isoformat()} ({section})."
+        f"{employee} assigned to {value or 'Set'} on {formatted_date} ({section})."
     )
     if detail:
         message = f"{message}\n{detail}"
     _post_discord_message(message, title="Schedule Updated", color=0x5865F2)
+
+
+def _notify_schedule_export(export_name: str, start: date, end: date) -> None:
+    formatted_start = start.strftime("%A, %Y-%m-%d")
+    formatted_end = end.strftime("%A, %Y-%m-%d")
+    message = f"{export_name} exported for {formatted_start} through {formatted_end}."
+    _post_discord_message(message, title="Schedule Exported", color=0xFEE75C)
 
 
 def _notify_timeoff_submission(name: str, role: str, start: date, end: date, approved: bool, vacation: bool) -> None:
@@ -410,6 +438,20 @@ class OccupancySnapshot(Base):
     date: Mapped[date] = mapped_column(Date)
     percentage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     uploaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class CoverageResolution(Base):
+    __tablename__ = "coverage_resolutions"
+    __table_args__ = (
+        UniqueConstraint("week_id", "section", "date", "issue", name="uniq_coverage_resolution"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_id: Mapped[int] = mapped_column(ForeignKey("weeks.id"))
+    section: Mapped[str] = mapped_column(String)
+    date: Mapped[date] = mapped_column(Date)
+    issue: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class TimeOff(Base):
@@ -545,6 +587,8 @@ UNDO_DELETE_SECONDS = 20
 _pending_period_undos: Dict[str, dict] = {}
 AI_UNDO_SECONDS = 10 * 60
 _pending_ai_undos: Dict[str, dict] = {}
+GENERATE_UNDO_SECONDS = 10 * 60
+_pending_generate_undos: Dict[str, dict] = {}
 
 
 def _prune_expired_period_undos() -> None:
@@ -560,6 +604,13 @@ def _prune_expired_ai_undos() -> None:
     expired = [token for token, payload in _pending_ai_undos.items() if payload.get("expires", 0) <= now]
     for token in expired:
         _pending_ai_undos.pop(token, None)
+
+
+def _prune_expired_generate_undos() -> None:
+    now = time.time()
+    expired = [token for token, payload in _pending_generate_undos.items() if payload.get("expires", 0) <= now]
+    for token in expired:
+        _pending_generate_undos.pop(token, None)
 
 # Seniority order for Front Desk manager-on-duty selection
 SENIORITY_ORDER = [
@@ -1276,6 +1327,19 @@ def init_db_once():
                     conn.exec_driver_sql("ALTER TABLE occupancy_levels ADD COLUMN uploaded_at DATETIME")
                 conn.exec_driver_sql(
                     """
+                    CREATE TABLE IF NOT EXISTS coverage_resolutions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        week_id INTEGER NOT NULL,
+                        section TEXT NOT NULL,
+                        date DATE NOT NULL,
+                        issue TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(week_id, section, date, issue)
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    """
                     CREATE TABLE IF NOT EXISTS schedule_templates (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         slot INTEGER UNIQUE NOT NULL,
@@ -1291,17 +1355,17 @@ def init_db_once():
                 if "dismissed_timeoff" not in a_cols:
                     conn.exec_driver_sql("ALTER TABLE assignments ADD COLUMN dismissed_timeoff INTEGER DEFAULT 0")
 
-        # Ensure sections exist (and update FD required to 6)
+        # Ensure sections exist and keep daily required counts current.
         names = {
             "Breakfast Bar": None,
-            "Front Desk": 6,
+            "Front Desk": None,
             "Shuttle": None,
             "Maintenance": 1,
         }
         existing = {sec.name: sec for sec in s.scalars(select(Section))}
         for n, required in names.items():
             if n in existing:
-                if required is not None and (existing[n].required_per_day or 0) != required:
+                if existing[n].required_per_day != required:
                     existing[n].required_per_day = required
             else:
                 s.add(Section(name=n, required_per_day=required))
@@ -1362,6 +1426,90 @@ def init_db_once():
         if not any_non_set:
             seed_example_assignments_db(wk.id, s)
             s.commit()
+
+
+def _sqlite_path_from_url(database_url: str) -> Optional[Path]:
+    parsed = urlparse(database_url or "")
+    if parsed.scheme != "sqlite":
+        return None
+    if parsed.path in {"", "/:memory:"}:
+        return None
+    return Path(parsed.path).resolve()
+
+
+def _database_backup_targets() -> list[tuple[str, Path]]:
+    targets: dict[Path, str] = {}
+    for choice, meta in DATABASE_CHOICES.items():
+        path = (BASE_DIR / meta["filename"]).resolve()
+        targets[path] = choice
+    active_path = _sqlite_path_from_url(DATABASE_URL)
+    if active_path is not None:
+        targets.setdefault(active_path, "active")
+    return [(label, path) for path, label in targets.items()]
+
+
+def _backup_sqlite_database(label: str, source_path: Path, timestamp: datetime) -> None:
+    if not source_path.exists():
+        return
+    DATABASE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = timestamp.strftime("%Y%m%d-%I%M%p")
+    destination = DATABASE_BACKUP_DIR / f"{source_path.stem}.{label}.{stamp}.db"
+    temp_destination = destination.with_suffix(".tmp")
+    if temp_destination.exists():
+        temp_destination.unlink()
+    source_conn = sqlite3.connect(str(source_path))
+    try:
+        destination_conn = sqlite3.connect(str(temp_destination))
+        try:
+            source_conn.backup(destination_conn)
+        finally:
+            destination_conn.close()
+    finally:
+        source_conn.close()
+    temp_destination.replace(destination)
+
+
+def _prune_old_database_backups(now: datetime) -> None:
+    if not DATABASE_BACKUP_DIR.exists():
+        return
+    cutoff = now.timestamp() - (DATABASE_BACKUP_RETENTION_HOURS * 60 * 60)
+    for backup_path in DATABASE_BACKUP_DIR.glob("*.db"):
+        try:
+            if backup_path.stat().st_mtime < cutoff:
+                backup_path.unlink()
+        except OSError:
+            continue
+
+
+def _run_database_backup_cycle() -> None:
+    now = datetime.now()
+    for label, source_path in _database_backup_targets():
+        try:
+            _backup_sqlite_database(label, source_path, now)
+        except Exception as exc:
+            print(f"Database backup failed for {source_path}: {exc}", flush=True)
+    _prune_old_database_backups(now)
+
+
+def start_database_backup_worker() -> None:
+    global _DATABASE_BACKUP_LOCK_FILE
+    if not DATABASE_BACKUP_ENABLED or DATABASE_BACKUP_INTERVAL_SECONDS <= 0:
+        return
+    DATABASE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    lock_file = open(DATABASE_BACKUP_DIR / ".backup-worker.lock", "a")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return
+    _DATABASE_BACKUP_LOCK_FILE = lock_file
+
+    def backup_loop() -> None:
+        while True:
+            _run_database_backup_cycle()
+            time.sleep(DATABASE_BACKUP_INTERVAL_SECONDS)
+
+    Thread(target=backup_loop, name="database-backup-worker", daemon=True).start()
 
 
 def has_approved_timeoff(name: str, role: str, dte: date, s: Session, exclude_id: Optional[int] = None) -> bool:
@@ -1524,13 +1672,13 @@ def has_generated_schedule(week_id: int) -> bool:
         return any_non_set is not None
 
 
-def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, int, dict, dict, dict, dict, int, dict]:
+def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int, dict, dict, dict, int, dict, dict, dict, dict, int, dict]:
     with SessionLocal() as s:
         wk = s.get(Week, week_id)
         dates = [d.isoformat() for d in daterange(wk.start_date, 7)]
         valid_date_keys = set(dates)
         
-        # Initialize Front Desk counts (2 per variant required)
+        # Initialize Front Desk counts for display only.
         shift_variants = ["AM", "PM", "Audit"]
         counts = {k: {variant: 0 for variant in shift_variants} for k in dates}
         missing = {k: False for k in dates}
@@ -1539,6 +1687,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         sh_variants = ["AM", "Midday", "PM", "Crew"]
         sh_counts = {k: {variant: 0 for variant in sh_variants} for k in dates}
         sh_missing = {k: False for k in dates}
+        sh_missing_reasons = {k: "" for k in dates}
 
         # Initialize Breakfast counts (1 per variant required)
         bb_variants = ["5AM–12PM", "6AM–12PM", "7AM–12PM"]
@@ -1578,6 +1727,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 [row.value for row in date_rows],
                 aircrew_arrival_minutes=aircrew_minutes_by_date.get(key),
             )
+        crew_coverage_windows: list[tuple[int, int]] = []
 
         # Count Front Desk assignments per shift variant per day
         # Include any employee assigned to a Front Desk-like label (AM/PM/Audit),
@@ -1608,6 +1758,13 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
                 variant = resolved_shuttle_variants_by_date.get(date_key, [None] * len(date_rows))[idx]
                 if variant:
                     sh_counts[date_key][variant] += 1
+                    if variant == "Crew":
+                        start_minutes, end_minutes = _shift_window_minutes(a.value)
+                        if start_minutes is not None and end_minutes is not None:
+                            base_minutes = a.date.toordinal() * 24 * 60
+                            crew_coverage_windows.append(
+                                (base_minutes + start_minutes, base_minutes + end_minutes)
+                            )
 
 
             # Breakfast variants (exact labels)
@@ -1622,13 +1779,6 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             if a.value == "8AM–4:30PM":
                 maint_counts[date_key] += 1
         
-        # Check for missing coverage: each variant needs at least 2 people
-        for date_key in dates:
-            for variant in shift_variants:
-                if counts[date_key][variant] < 2:
-                    missing[date_key] = True
-                    break
-
         # Compute duplicate-stagger warnings for Front Desk per date
         for date_key in dates:
             dup_any = False
@@ -1643,13 +1793,33 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
         
         # For backward compatibility, also return total counts
         total_counts = {k: sum(counts[k].values()) for k in dates}
-        required = 6  # 2 per variant * 3 variants
-        # Shuttle missing and required (1 per each of 4 variants)
+        required = 0
+        # Shuttle missing: AM/Midday/PM are required daily. Crew is required
+        # only when aircrew pickups exist, and every pickup needs an active
+        # Crew-classified driver during that pickup time.
         for date_key in dates:
-            for variant in sh_variants:
+            reasons: list[str] = []
+            pickup_minutes = aircrew_minutes_by_date.get(date_key) or []
+            for variant in ("AM", "Midday", "PM"):
                 if sh_counts[date_key][variant] < 1:
-                    sh_missing[date_key] = True
-                    break
+                    reasons.append(f"Missing Shuttle {variant} driver ({sh_counts[date_key][variant]}/1)")
+            if pickup_minutes:
+                pickup_labels = ", ".join(_format_minutes_clock(minute) for minute in pickup_minutes)
+                if sh_counts[date_key]["Crew"] < 1:
+                    reasons.append(f"Missing Shuttle Crew driver for airline pickup at {pickup_labels}")
+                else:
+                    uncovered_pickups: list[int] = []
+                    base_minutes = date.fromisoformat(date_key).toordinal() * 24 * 60
+                    for pickup_minute in pickup_minutes:
+                        pickup_at = base_minutes + pickup_minute
+                        if not any(start <= pickup_at <= end for start, end in crew_coverage_windows):
+                            uncovered_pickups.append(pickup_minute)
+                    if uncovered_pickups:
+                        uncovered_labels = ", ".join(_format_minutes_clock(minute) for minute in uncovered_pickups)
+                        reasons.append(f"No active Crew driver during airline pickup at {uncovered_labels}")
+            if reasons:
+                sh_missing[date_key] = True
+                sh_missing_reasons[date_key] = "; ".join(reasons)
         sh_required = 4
 
         # Breakfast missing and required (1 per each of 3 variants)
@@ -1688,6 +1858,7 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             sh_missing,
             sh_required,
             sh_counts,
+            sh_missing_reasons,
             bb_missing,
             bb_required,
             bb_counts,
@@ -1697,6 +1868,88 @@ def coverage_snapshot_db(week_id: int) -> tuple[dict, dict, int, dict, dict, int
             maint_required,
             maint_counts,
         )
+
+
+def _apply_coverage_resolutions(
+    week_id: int,
+    missing: dict[str, bool],
+    shuttle_missing: dict[str, bool],
+    shuttle_missing_reasons: dict[str, str],
+    bb_missing: dict[str, bool],
+    maintenance_missing: dict[str, bool],
+) -> dict[str, dict[str, bool]]:
+    maps_by_section = {
+        "Front Desk": missing,
+        "Shuttle": shuttle_missing,
+        "Breakfast Bar": bb_missing,
+        "Maintenance": maintenance_missing,
+    }
+    resolved = {section: {date_key: False for date_key in values} for section, values in maps_by_section.items()}
+    with SessionLocal() as s:
+        rows = list(s.scalars(select(CoverageResolution).where(CoverageResolution.week_id == week_id)))
+        changed = False
+        for row in rows:
+            date_key = row.date.isoformat()
+            section_map = maps_by_section.get(row.section)
+            if row.issue != "understaff" or section_map is None or not section_map.get(date_key):
+                s.delete(row)
+                changed = True
+                continue
+            section_map[date_key] = False
+            resolved[row.section][date_key] = True
+            if row.section == "Shuttle":
+                shuttle_missing_reasons[date_key] = ""
+        if changed:
+            s.commit()
+    return resolved
+
+
+def coverage_payload_db(week_id: int) -> dict[str, Any]:
+    (
+        counts,
+        missing,
+        required,
+        variant_counts,
+        shuttle_missing,
+        shuttle_required,
+        shuttle_counts,
+        shuttle_missing_reasons,
+        bb_missing,
+        bb_required,
+        bb_counts,
+        bb_order_warnings,
+        fd_duplicates,
+        maintenance_missing,
+        maintenance_required,
+        maintenance_counts,
+    ) = coverage_snapshot_db(week_id)
+    coverage_resolved = _apply_coverage_resolutions(
+        week_id,
+        missing,
+        shuttle_missing,
+        shuttle_missing_reasons,
+        bb_missing,
+        maintenance_missing,
+    )
+    return {
+        "counts": counts,
+        "missing": missing,
+        "required": required,
+        "variant_counts": variant_counts,
+        "shuttle_missing": shuttle_missing,
+        "shuttle_required": shuttle_required,
+        "shuttle_counts": shuttle_counts,
+        "shuttle_missing_reasons": shuttle_missing_reasons,
+        "bb_missing": bb_missing,
+        "bb_required": bb_required,
+        "bb_counts": bb_counts,
+        "bb_order_warnings": bb_order_warnings,
+        "fd_duplicates": fd_duplicates,
+        "maintenance_missing": maintenance_missing,
+        "maintenance_required": maintenance_required,
+        "maintenance_counts": maintenance_counts,
+        "coverage_resolved": coverage_resolved,
+    }
 
 
 def double_booked_snapshot(week_id: int) -> dict[str, list[str]]:
@@ -1935,14 +2188,9 @@ def build_week_context(week_id: int):
         
         meta = {
             "range_label": format_four_week_label(period_start, period_end),
-            "success_banner": (
-                "4-week schedule saved from "
-                f"{period_start.strftime('%B')} {period_start.day}, {period_start.year} "
-                "to "
-                f"{period_end.strftime('%B')} {period_end.day}, {period_end.year}!"
-            ),
+            "success_banner": "",
             "week_label": f"{format_week_label(wk.start_date)}",
-            "fd_note": "Front Desk: 2 agents per AM/PM/Audit (6 total/day)",
+            "fd_note": "",
             "schedule_generated": schedule_generated,
             "week_id": week_id,
         }
@@ -1989,8 +2237,26 @@ def _with_template_upload_meta(meta: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def _with_generate_undo_meta(meta: dict[str, Any], week_id: int) -> dict[str, Any]:
+    _prune_expired_generate_undos()
+    enriched = dict(meta)
+    undo_token = (request.args.get("generate_undo") or "").strip()
+    undo_payload = _pending_generate_undos.get(undo_token) if undo_token else None
+    if undo_payload and undo_payload.get("week_id") == week_id:
+        remaining = max(0, int(undo_payload["expires"] - time.time()))
+        enriched["generate_undo_token"] = undo_token
+        enriched["generate_undo_seconds"] = remaining
+        enriched["generate_undo_deadline_ms"] = int(undo_payload["expires"] * 1000)
+    if request.args.get("generate_undone") == "1":
+        enriched["success_banner"] = "Generated schedule changes were undone. The previous 4-week schedule was restored."
+    elif request.args.get("generated") == "1":
+        enriched["success_banner"] = "New 4-week schedule generated. You can undo it for a limited time."
+    return enriched
+
+
 # Initialize DB at import time (Flask 3.x removed before_first_request)
 init_db_once()
+start_database_backup_worker()
 
 # ---- Routes ----
 
@@ -2029,7 +2295,7 @@ def index():
         if not week:
             week = _ensure_week_and_assignments(s, start)
         ctx = build_week_context(week.id)
-    meta = _with_template_upload_meta(ctx["meta"])
+    meta = _with_generate_undo_meta(_with_template_upload_meta(ctx["meta"]), ctx["meta"]["week_id"])
     (
         counts,
         missing,
@@ -2038,6 +2304,7 @@ def index():
         shuttle_missing,
         shuttle_required,
         shuttle_counts,
+        shuttle_missing_reasons,
         bb_missing,
         bb_required,
         bb_counts,
@@ -2047,6 +2314,14 @@ def index():
         maintenance_required,
         maintenance_counts,
     ) = coverage_snapshot_db(week.id)
+    coverage_resolved = _apply_coverage_resolutions(
+        week.id,
+        missing,
+        shuttle_missing,
+        shuttle_missing_reasons,
+        bb_missing,
+        maintenance_missing,
+    )
     return render_template(
         "schedule.html",
         meta=meta,
@@ -2066,6 +2341,7 @@ def index():
         shuttle_missing=shuttle_missing,
         shuttle_required=shuttle_required,
         shuttle_counts=shuttle_counts,
+        shuttle_missing_reasons=shuttle_missing_reasons,
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
@@ -2074,6 +2350,7 @@ def index():
         maintenance_missing=maintenance_missing,
         maintenance_required=maintenance_required,
         maintenance_counts=maintenance_counts,
+        coverage_resolved=coverage_resolved,
         fd_duplicates=fd_duplicates,
         time_off=ctx["time_off"],
         vacation_days=ctx.get("vacation_days", {}),
@@ -2717,7 +2994,7 @@ def aircrew_time_filter(value: Optional[str]) -> str:
 @app.route("/week/<int:week_id>")
 def view_week(week_id: int):
     ctx = build_week_context(week_id)
-    meta = _with_template_upload_meta(ctx["meta"])
+    meta = _with_generate_undo_meta(_with_template_upload_meta(ctx["meta"]), week_id)
     _prune_expired_ai_undos()
     undo_token = (request.args.get("ai_undo") or "").strip()
     undo_payload = _pending_ai_undos.get(undo_token) if undo_token else None
@@ -2753,6 +3030,7 @@ def view_week(week_id: int):
         shuttle_missing,
         shuttle_required,
         shuttle_counts,
+        shuttle_missing_reasons,
         bb_missing,
         bb_required,
         bb_counts,
@@ -2762,6 +3040,14 @@ def view_week(week_id: int):
         maintenance_required,
         maintenance_counts,
     ) = coverage_snapshot_db(week_id)
+    coverage_resolved = _apply_coverage_resolutions(
+        week_id,
+        missing,
+        shuttle_missing,
+        shuttle_missing_reasons,
+        bb_missing,
+        maintenance_missing,
+    )
     return render_template(
         "schedule.html",
         meta=meta,
@@ -2781,6 +3067,7 @@ def view_week(week_id: int):
         shuttle_missing=shuttle_missing,
         shuttle_required=shuttle_required,
         shuttle_counts=shuttle_counts,
+        shuttle_missing_reasons=shuttle_missing_reasons,
         bb_missing=bb_missing,
         bb_required=bb_required,
         bb_counts=bb_counts,
@@ -2789,6 +3076,7 @@ def view_week(week_id: int):
         maintenance_missing=maintenance_missing,
         maintenance_required=maintenance_required,
         maintenance_counts=maintenance_counts,
+        coverage_resolved=coverage_resolved,
         fd_duplicates=fd_duplicates,
         time_off=ctx["time_off"],
         vacation_days=ctx.get("vacation_days", {}),
@@ -3266,6 +3554,78 @@ def role_availability_variants(role_name: str) -> list[str]:
     return []
 
 
+SHUTTLE_AVAILABILITY_RANGE_PREFIX = "__shuttle_time_range__::"
+SHUTTLE_AVAILABILITY_DAY_START = 3 * 60
+SHUTTLE_AVAILABILITY_DAY_END = (24 + 2) * 60
+
+
+def _shuttle_availability_range_token(start_minutes: int, end_minutes: int) -> str:
+    return f"{SHUTTLE_AVAILABILITY_RANGE_PREFIX}{start_minutes}::{end_minutes}"
+
+
+def _parse_shuttle_availability_range(value: str) -> Optional[tuple[int, int]]:
+    if not (value or "").startswith(SHUTTLE_AVAILABILITY_RANGE_PREFIX):
+        return None
+    try:
+        start_raw, end_raw = value[len(SHUTTLE_AVAILABILITY_RANGE_PREFIX):].split("::", 1)
+        start_minutes = int(start_raw)
+        end_minutes = int(end_raw)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= start_minutes < end_minutes <= (48 * 60)):
+        return None
+    return start_minutes, end_minutes
+
+
+def _merge_availability_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start_minutes, end_minutes in sorted(ranges):
+        if merged and start_minutes <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end_minutes)
+        else:
+            merged.append([start_minutes, end_minutes])
+    return [(start_minutes, end_minutes) for start_minutes, end_minutes in merged]
+
+
+def _fallback_availability_day_exclusion(instruction: str) -> Optional[dict[str, Any]]:
+    """Handle an all-days/weekday/weekend exclusion only after CLIProxy fails."""
+    normalized = (instruction or "").strip().casefold()
+    day_names = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    if re.search(r"\b(?:every|all)\s+days?\b|\beveryday\b", normalized):
+        target_days = set(range(7))
+    elif re.search(r"\bweekdays?\b", normalized):
+        target_days = set(range(5))
+    elif re.search(r"\bweekends?\b", normalized):
+        target_days = {5, 6}
+    else:
+        return None
+    exclusion_match = re.search(r"\b(?:except|excluding|but\s+not|apart\s+from)\b(.+)$", normalized)
+    if not exclusion_match:
+        return None
+    exclusion_text = exclusion_match.group(1)
+    excluded_days = {day_index for name, day_index in day_names.items() if re.search(rf"\b{name}\b", exclusion_text)}
+    if not excluded_days:
+        return None
+    included_days = sorted(target_days - excluded_days)
+    operations = []
+    if included_days:
+        operations.append({
+            "action": "set",
+            "days": included_days,
+            "start": SHUTTLE_AVAILABILITY_DAY_START,
+            "end": SHUTTLE_AVAILABILITY_DAY_END,
+        })
+    operations.append({"action": "clear", "days": sorted(excluded_days), "start": None, "end": None})
+    excluded_label = ", ".join(name.title() for name, index in day_names.items() if index in excluded_days)
+    return {
+        "operations": operations,
+        "summary": f"Set full-day availability except {excluded_label}.",
+    }
+
+
 @app.route("/admin/employees/<int:eid>/availability", methods=["GET", "POST"]) 
 def employee_availability(eid: int):
     days = [
@@ -3302,26 +3662,81 @@ def employee_availability(eid: int):
             emp.preferred_shifts_per_week = int(pref_count_raw) if pref_count_raw.isdigit() else None
             emp.max_shifts_per_week = int(max_count_raw) if max_count_raw.isdigit() else None
             emp.temporary = bool(request.form.get("temporary"))
-            # Save availability: clear and re-add
+            # Save availability: clear and re-add. Shuttle uses flexible time
+            # ranges; the other roles retain their exact shift toggles.
             # NOTE: We don't clear all availability across roles; only rebuild for the role being edited.
-            s.query(EmployeeAvailability).filter(
+            availability_query = s.query(EmployeeAvailability).filter(
                 EmployeeAvailability.employee_id == emp.id,
-                EmployeeAvailability.shift_label.in_(variants)
-            ).delete()
-            selected = request.form.getlist("avail")  # values: "day::label"
-            for token in selected:
-                try:
-                    d_str, label = token.split("::", 1)
-                    d_idx = int(d_str)
-                except ValueError:
-                    continue
-                if label in variants and 0 <= d_idx <= 6:
-                    s.add(EmployeeAvailability(employee_id=emp.id, day_of_week=d_idx, shift_label=label, allowed=True))
+            )
+            if role == "Shuttle":
+                availability_query.filter(
+                    (EmployeeAvailability.shift_label.in_(variants))
+                    | (EmployeeAvailability.shift_label.like(f"{SHUTTLE_AVAILABILITY_RANGE_PREFIX}%"))
+                ).delete(synchronize_session=False)
+                submitted_ranges: dict[int, list[tuple[int, int]]] = {idx: [] for idx in range(7)}
+                for token in request.form.getlist("availability_range"):
+                    try:
+                        d_raw, start_raw, end_raw = token.split("::", 2)
+                        d_idx = int(d_raw)
+                        start_minutes = int(start_raw)
+                        end_minutes = int(end_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if (
+                        0 <= d_idx <= 6
+                        and SHUTTLE_AVAILABILITY_DAY_START <= start_minutes
+                        and start_minutes + 45 <= end_minutes <= SHUTTLE_AVAILABILITY_DAY_END
+                        and start_minutes % 15 == 0
+                        and end_minutes % 15 == 0
+                    ):
+                        submitted_ranges[d_idx].append((start_minutes, end_minutes))
+                for d_idx, ranges_for_day in submitted_ranges.items():
+                    for start_minutes, end_minutes in _merge_availability_ranges(ranges_for_day):
+                        s.add(EmployeeAvailability(
+                            employee_id=emp.id,
+                            day_of_week=d_idx,
+                            shift_label=_shuttle_availability_range_token(start_minutes, end_minutes),
+                            allowed=True,
+                        ))
+            else:
+                availability_query.filter(EmployeeAvailability.shift_label.in_(variants)).delete(synchronize_session=False)
+                selected = request.form.getlist("avail")  # values: "day::label"
+                for token in selected:
+                    try:
+                        d_str, label = token.split("::", 1)
+                        d_idx = int(d_str)
+                    except ValueError:
+                        continue
+                    if label in variants and 0 <= d_idx <= 6:
+                        s.add(EmployeeAvailability(employee_id=emp.id, day_of_week=d_idx, shift_label=label, allowed=True))
             s.commit()
             return redirect(url_for('employee_availability', eid=eid, role=role))
 
         # GET: build checked set
-        existing = {(ea.day_of_week, ea.shift_label) for ea in s.scalars(select(EmployeeAvailability).where(EmployeeAvailability.employee_id == emp.id))}
+        availability_rows = list(s.scalars(select(EmployeeAvailability).where(EmployeeAvailability.employee_id == emp.id)))
+        existing = {(ea.day_of_week, ea.shift_label) for ea in availability_rows}
+        availability_ranges: list[dict[str, int]] = []
+        if role == "Shuttle":
+            ranges_by_day: dict[int, list[tuple[int, int]]] = {idx: [] for idx in range(7)}
+            for ea in availability_rows:
+                parsed_range = _parse_shuttle_availability_range(ea.shift_label)
+                if parsed_range:
+                    ranges_by_day[ea.day_of_week].append(parsed_range)
+                elif ea.shift_label in variants:
+                    start_minutes, end_minutes = _shift_window_minutes(ea.shift_label)
+                    if start_minutes is not None and end_minutes is not None:
+                        ranges_by_day[ea.day_of_week].append((start_minutes, end_minutes))
+            availability_ranges = [
+                {"day": d_idx, "start": start_minutes, "end": end_minutes}
+                for d_idx, ranges_for_day in ranges_by_day.items()
+                for start_minutes, end_minutes in _merge_availability_ranges(ranges_for_day)
+            ]
+        time_labels = []
+        for minute_value in range(SHUTTLE_AVAILABILITY_DAY_START, SHUTTLE_AVAILABILITY_DAY_END + 1, 60):
+            hour_24 = (minute_value // 60) % 24
+            suffix = "AM" if hour_24 < 12 else "PM"
+            hour_12 = hour_24 % 12 or 12
+            time_labels.append({"minutes": minute_value, "label": f"{hour_12}:00 {suffix}"})
         # Render form
         return render_template(
             "employee_availability.html",
@@ -3331,7 +3746,179 @@ def employee_availability(eid: int):
             days=days,
             existing=existing,
             allowed_roles=allowed_names,
+            availability_ranges=availability_ranges,
+            time_labels=time_labels,
+            availability_day_start=SHUTTLE_AVAILABILITY_DAY_START,
+            availability_day_end=SHUTTLE_AVAILABILITY_DAY_END,
         )
+
+
+@app.post("/api/employees/<int:eid>/availability/interpret")
+def interpret_employee_availability(eid: int):
+    payload = request.get_json(silent=True) or {}
+    instruction = str(payload.get("instruction") or "").strip()[:1000]
+    if not instruction:
+        return jsonify({"ok": False, "error": "Enter an availability instruction first."}), 400
+    if not _openai_rule_interpreter_configured() or _openai_base_url() == "https://api.openai.com/v1":
+        return jsonify({"ok": False, "error": "CLIProxy is not configured."}), 503
+
+    with SessionLocal() as s:
+        employee = s.get(Employee, eid)
+        if not employee:
+            return jsonify({"ok": False, "error": "Employee not found."}), 404
+        allowed_sections = [s.get(Section, employee.section_id)] + employee_roles_for(s, eid)
+        if "Shuttle" not in {section.name for section in allowed_sections if section}:
+            return jsonify({"ok": False, "error": "This employee does not have the Shuttle role."}), 400
+
+    current_ranges = []
+    for item in payload.get("current_ranges") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            day_index = int(item.get("day"))
+            start_minutes = int(item.get("start"))
+            end_minutes = int(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= day_index <= 6 and SHUTTLE_AVAILABILITY_DAY_START <= start_minutes < end_minutes <= SHUTTLE_AVAILABILITY_DAY_END:
+            current_ranges.append({"day": day_index, "start": start_minutes, "end": end_minutes})
+
+    operation_schema = {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["set", "add", "clear"]},
+            "days": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 7,
+                "items": {"type": "integer", "minimum": 0, "maximum": 6},
+            },
+            "start_minutes": {"type": ["integer", "null"], "minimum": SHUTTLE_AVAILABILITY_DAY_START, "maximum": SHUTTLE_AVAILABILITY_DAY_END},
+            "end_minutes": {"type": ["integer", "null"], "minimum": SHUTTLE_AVAILABILITY_DAY_START, "maximum": SHUTTLE_AVAILABILITY_DAY_END},
+            "explanation": {"type": "string"},
+        },
+        "required": ["action", "days", "start_minutes", "end_minutes", "explanation"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "operations": {"type": "array", "maxItems": 14, "items": operation_schema},
+        },
+        "required": ["summary", "operations"],
+        "additionalProperties": False,
+    }
+    context = {
+        "employee": employee.name,
+        "instruction": instruction,
+        "current_ranges": current_ranges,
+        "day_indexes": {
+            "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+            "Friday": 4, "Saturday": 5, "Sunday": 6,
+        },
+    }
+    api_key = _openai_rule_api_key()
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = requests.post(
+            _openai_responses_url(),
+            headers=headers,
+            json={
+                "model": _openai_rule_model(),
+                "store": False,
+                "instructions": (
+                    "Convert a manager's natural-language request into shuttle-driver weekly availability operations. "
+                    "The editable day runs from 3:00 AM (180 minutes) through 2:00 AM the next day (1560 minutes). "
+                    "Times after midnight use next-day values: midnight=1440, 1:00 AM=1500, 2:00 AM=1560. "
+                    "All times must use 15-minute increments and every availability range must be at least 45 minutes long. Use day indexes exactly as supplied. "
+                    "Use set when the request defines or replaces availability for a day, add only for words such as also/add, "
+                    "and clear to remove all availability on the named days (with null times). "
+                    "A request such as 'every day except Thursday' means set full-day availability on the other six days and clear Thursday. "
+                    "Interpret ordinary phrases such as morning, afternoon, evening, late night, after, before, until, and open availability. "
+                    "For relative changes, use current_ranges. Do not invent days that are not stated; if no day is stated, apply to all seven days. "
+                    "Return no operations when the request cannot safely be represented. Keep the summary brief."
+                ),
+                "input": json.dumps(context),
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "shuttle_availability_interpretation",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+                "max_output_tokens": 1200,
+            },
+            timeout=25,
+        )
+        response.raise_for_status()
+        model_result = json.loads(_extract_responses_output_text(response.json()))
+    except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError) as exc:
+        app.logger.warning("Availability interpretation failed: %s", exc)
+        quota_message = ""
+        error_response = getattr(exc, "response", None)
+        if error_response is not None and error_response.status_code == 429:
+            quota_message = "CLIProxy is out of quota."
+            try:
+                error_payload = error_response.json().get("error") or {}
+            except (ValueError, TypeError, AttributeError):
+                error_payload = {}
+            reset_label = str(error_payload.get("reset_time") or "").strip()
+            reset_seconds = error_payload.get("resets_in_seconds") or error_payload.get("reset_seconds")
+            if reset_label:
+                quota_message += f" It resets in {reset_label}."
+            elif isinstance(reset_seconds, (int, float)) and reset_seconds > 0:
+                reset_hours = max(1, round(reset_seconds / 3600))
+                quota_message += f" It resets in about {reset_hours} hours."
+        fallback = _fallback_availability_day_exclusion(instruction)
+        if fallback:
+            return jsonify({
+                "ok": True,
+                **fallback,
+                "interpreter": "local_fallback",
+                "proxy_notice": quota_message or "CLIProxy is temporarily unavailable.",
+            })
+        if quota_message:
+            return jsonify({"ok": False, "error": quota_message}), 429
+        return jsonify({"ok": False, "error": "CLIProxy could not interpret that instruction. Try including a day and time."}), 502
+
+    valid_operations = []
+    for operation in model_result.get("operations") or []:
+        if not isinstance(operation, dict):
+            continue
+        action = str(operation.get("action") or "")
+        days_for_operation = sorted({day for day in operation.get("days") or [] if isinstance(day, int) and 0 <= day <= 6})
+        if action not in {"set", "add", "clear"} or not days_for_operation:
+            continue
+        if action == "clear":
+            valid_operations.append({"action": action, "days": days_for_operation, "start": None, "end": None})
+            continue
+        start_minutes = operation.get("start_minutes")
+        end_minutes = operation.get("end_minutes")
+        if not isinstance(start_minutes, int) or not isinstance(end_minutes, int):
+            continue
+        start_minutes = round(start_minutes / 15) * 15
+        end_minutes = round(end_minutes / 15) * 15
+        if SHUTTLE_AVAILABILITY_DAY_START <= start_minutes and start_minutes + 45 <= end_minutes <= SHUTTLE_AVAILABILITY_DAY_END:
+            valid_operations.append({"action": action, "days": days_for_operation, "start": start_minutes, "end": end_minutes})
+    if not valid_operations:
+        fallback = _fallback_availability_day_exclusion(instruction)
+        if fallback:
+            return jsonify({
+                "ok": True,
+                **fallback,
+                "interpreter": "local_fallback",
+            })
+        return jsonify({"ok": False, "error": "That instruction did not describe a clear availability change."}), 422
+    return jsonify({
+        "ok": True,
+        "operations": valid_operations,
+        "summary": str(model_result.get("summary") or "Availability updated.").strip()[:240],
+        "interpreter": "cliproxy",
+    })
 
 
 @app.route("/timeoff")
@@ -3341,10 +3928,32 @@ def timeoff_page():
             return start.strftime("%b %d, %Y")
         return f"{start.strftime('%b %d, %Y')} to {end.strftime('%b %d, %Y')}"
 
+    def parse_calendar_month(value: str) -> date:
+        try:
+            year_s, month_s = (value or "").split("-", 1)
+            year_i, month_i = int(year_s), int(month_s)
+            if 1 <= month_i <= 12:
+                return date(year_i, month_i, 1)
+        except (TypeError, ValueError):
+            pass
+        today_d = date.today()
+        return date(today_d.year, today_d.month, 1)
+
+    def add_months(value: date, offset: int) -> date:
+        month_index = (value.year * 12 + (value.month - 1)) + offset
+        return date(month_index // 12, (month_index % 12) + 1, 1)
+
     today = date.today()
+    calendar_month = parse_calendar_month(request.args.get("month") or "")
+    next_month = add_months(calendar_month, 1)
+    previous_month = add_months(calendar_month, -1)
+    calendar_start = calendar_month - timedelta(days=(calendar_month.weekday() + 1) % 7)
+    calendar_days = [calendar_start + timedelta(days=offset) for offset in range(42)]
+    calendar_end = calendar_days[-1]
     with SessionLocal() as s:
         upcoming_items = []
         archived_items = []
+        calendar_timeoff = []
         for t in s.scalars(select(TimeOff)):
             item = {
                 "id": t.id,
@@ -3356,6 +3965,8 @@ def timeoff_page():
                 "from_date": t.from_date,
                 "to_date": t.to_date,
             }
+            if t.from_date <= calendar_end and t.to_date >= calendar_start:
+                calendar_timeoff.append(item)
             if t.to_date < today:
                 archived_items.append(item)
             else:
@@ -3364,12 +3975,38 @@ def timeoff_page():
         archived_items.sort(key=lambda item: (item["to_date"], item["from_date"], item["name"].lower()), reverse=True)
         employees = list(s.scalars(select(Employee)))
         sections = list(s.scalars(select(Section)))
+    calendar_weeks = []
+    for week_start_index in range(0, len(calendar_days), 7):
+        week = []
+        for day_value in calendar_days[week_start_index:week_start_index + 7]:
+            day_items = [
+                item for item in calendar_timeoff
+                if item["from_date"] <= day_value <= item["to_date"]
+            ]
+            day_items.sort(key=lambda item: (not item["vacation"], item["name"].lower(), item["from_date"], item["to_date"]))
+            week.append({
+                "date": day_value,
+                "key": day_value.isoformat(),
+                "day": day_value.day,
+                "is_today": day_value == today,
+                "in_month": day_value.month == calendar_month.month and day_value.year == calendar_month.year,
+                "requests": day_items,
+            })
+        calendar_weeks.append(week)
     return render_template(
         "timeoff.html",
         time_off=upcoming_items,
         archived_time_off=archived_items,
+        calendar_weeks=calendar_weeks,
+        calendar_month=calendar_month,
+        calendar_month_value=calendar_month.strftime("%Y-%m"),
+        calendar_month_label=calendar_month.strftime("%B %Y"),
+        previous_month_url=url_for("timeoff_page", month=previous_month.strftime("%Y-%m")),
+        next_month_url=url_for("timeoff_page", month=next_month.strftime("%Y-%m")),
+        current_month_url=url_for("timeoff_page", month=date(today.year, today.month, 1).strftime("%Y-%m")),
         employees=employees,
         sections=sections,
+        import_month_default=calendar_month.strftime("%Y-%m"),
     )
 
 
@@ -3452,6 +4089,7 @@ def timeoff_new():
                     shuttle_missing,
                     shuttle_required,
                     shuttle_counts,
+                    shuttle_missing_reasons,
                     bb_missing,
                     bb_required,
                     bb_counts,
@@ -3480,6 +4118,7 @@ def timeoff_new():
                     "shuttle_missing": shuttle_missing,
                     "shuttle_required": shuttle_required,
                     "shuttle_counts": shuttle_counts,
+                    "shuttle_missing_reasons": shuttle_missing_reasons,
                     "bb_missing": bb_missing,
                     "bb_required": bb_required,
                     "bb_counts": bb_counts,
@@ -3493,6 +4132,160 @@ def timeoff_new():
     if timeoff_info:
         _notify_timeoff_submission(**timeoff_info)
     return redirect(url_for('timeoff_page'))
+
+
+@app.route("/timeoff/import", methods=["POST"])
+def import_timeoff_requests():
+    month_value = (request.form.get("month") or "").strip()
+    upload = request.files.get("file")
+    if not month_value:
+        return jsonify({"ok": False, "error": "Choose the month to import."}), 400
+    try:
+        year_s, month_s = month_value.split("-", 1)
+        import_year, import_month = int(year_s), int(month_s)
+        if not (1 <= import_month <= 12):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Choose a valid month."}), 400
+    if upload is None or not upload.filename:
+        return jsonify({"ok": False, "error": "Choose an Excel file to upload."}), 400
+    filename = (upload.filename or "").casefold()
+    if not filename.endswith((".xlsx", ".xlsm")):
+        return jsonify({"ok": False, "error": "Upload a .xlsx or .xlsm file."}), 400
+    payload = upload.read() or b""
+    if not payload:
+        return jsonify({"ok": False, "error": "The uploaded file is empty."}), 400
+
+    try:
+        calendar_cells = _extract_timeoff_calendar_cells(payload, import_year, import_month)
+    except Exception as exc:
+        app.logger.warning("Time-off workbook parse failed: %s", exc)
+        return jsonify({"ok": False, "error": "Unable to read that Excel file."}), 400
+
+    with SessionLocal() as s:
+        employee_context, employees_by_name = _employee_import_context(s)
+        try:
+            extracted, model_warnings, model_summary = _interpret_timeoff_import_cells(
+                cells=calendar_cells,
+                employees=employee_context,
+                year=import_year,
+                month=import_month,
+            )
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 503
+        except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError) as exc:
+            app.logger.warning("CLIProxy time-off import failed: %s", exc)
+            return jsonify({"ok": False, "error": "CLIProxy could not extract the time-off requests from that file."}), 502
+
+        normalized_items: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        seen_day_items: set[tuple[int, date, bool]] = set()
+        for item in extracted:
+            if not isinstance(item, dict):
+                continue
+            raw_name = str(item.get("employee_name") or "").strip()
+            raw_date = str(item.get("date") or "").strip()
+            raw_type = str(item.get("request_type") or "").strip()
+            raw_text = str(item.get("raw_text") or "").strip()
+            confidence = item.get("confidence")
+            if isinstance(confidence, (int, float)) and confidence < 0.45:
+                skipped.append(f"Skipped low-confidence match: {raw_text or raw_name or raw_date}")
+                continue
+            try:
+                request_date = date.fromisoformat(raw_date)
+            except ValueError:
+                skipped.append(f"Skipped invalid date from CLIProxy: {raw_date or raw_text}")
+                continue
+            if request_date.year != import_year or request_date.month != import_month:
+                continue
+            matches = employees_by_name.get(raw_name.casefold(), [])
+            if not matches:
+                skipped.append(f"Skipped unknown employee: {raw_name or raw_text}")
+                continue
+            if len(matches) > 1:
+                skipped.append(f"Skipped ambiguous employee name: {raw_name}")
+                continue
+            employee = matches[0]
+            section = employee.section or s.get(Section, employee.section_id)
+            role = section.name if section else ""
+            vacation = raw_type == "vacation"
+            key = (employee.id, request_date, vacation)
+            if key in seen_day_items:
+                continue
+            seen_day_items.add(key)
+            normalized_items.append({
+                "employee": employee,
+                "role": role,
+                "date": request_date,
+                "vacation": vacation,
+            })
+
+        ranges = _coalesce_timeoff_days(normalized_items)
+        created_items = []
+        duplicates = 0
+        for item in ranges:
+            employee = item["employee"]
+            role = item["role"]
+            from_date = item["from_date"]
+            to_date = item["to_date"]
+            vacation = bool(item["vacation"])
+            if _timeoff_range_already_saved(
+                s,
+                name=employee.name,
+                role=role,
+                start=from_date,
+                end=to_date,
+                vacation=vacation,
+            ):
+                duplicates += 1
+                continue
+            rec = TimeOff(
+                name=employee.name,
+                role=role,
+                from_date=from_date,
+                to_date=to_date,
+                approved=True,
+                vacation=vacation,
+            )
+            s.add(rec)
+            s.flush()
+            _update_assignments_for_timeoff(
+                s,
+                employee=employee,
+                start=from_date,
+                end=to_date,
+                approved=True,
+                timeoff=rec,
+            )
+            created_items.append({
+                "id": rec.id,
+                "name": rec.name,
+                "role": rec.role,
+                "from": rec.from_date.isoformat(),
+                "to": rec.to_date.isoformat(),
+                "approved": bool(rec.approved),
+                "vacation": bool(rec.vacation),
+            })
+        s.commit()
+
+    warnings = [warning for warning in [*model_warnings, *skipped] if warning]
+    message = (
+        f"Imported {len(created_items)} time-off request"
+        f"{'' if len(created_items) == 1 else 's'} for {date(import_year, import_month, 1).strftime('%B %Y')}."
+    )
+    if duplicates:
+        message += f" Skipped {duplicates} already saved range{'' if duplicates == 1 else 's'}."
+    return jsonify({
+        "ok": True,
+        "message": message,
+        "summary": model_summary,
+        "created": len(created_items),
+        "duplicates": duplicates,
+        "warnings": warnings[:25],
+        "items": created_items,
+        "cells_read": len(calendar_cells),
+        "interpreter": _openai_rule_model(),
+    })
 
 
 @app.route("/schedules")
@@ -3650,6 +4443,7 @@ def assign():
         shuttle_missing,
         shuttle_required,
         shuttle_counts,
+        shuttle_missing_reasons,
         bb_missing,
         bb_required,
         bb_counts,
@@ -3659,6 +4453,14 @@ def assign():
         maintenance_required,
         maintenance_counts,
     ) = coverage_snapshot_db(week.id)
+    coverage_resolved = _apply_coverage_resolutions(
+        week.id,
+        missing,
+        shuttle_missing,
+        shuttle_missing_reasons,
+        bb_missing,
+        maintenance_missing,
+    )
     response_payload = {
         "ok": True,
         "counts": counts,
@@ -3668,6 +4470,7 @@ def assign():
         "shuttle_missing": shuttle_missing,
         "shuttle_required": shuttle_required,
         "shuttle_counts": shuttle_counts,
+        "shuttle_missing_reasons": shuttle_missing_reasons,
         "bb_missing": bb_missing,
         "bb_required": bb_required,
         "bb_counts": bb_counts,
@@ -3676,6 +4479,7 @@ def assign():
         "maintenance_missing": maintenance_missing,
         "maintenance_required": maintenance_required,
         "maintenance_counts": maintenance_counts,
+        "coverage_resolved": coverage_resolved,
         "double_booked": double_booked_snapshot(week.id),
     }
 
@@ -3721,6 +4525,58 @@ def assign():
 
     _notify_schedule_change(employee_name, section, dte, final_value, detail=notify_detail)
     return jsonify(response_payload)
+
+
+@app.route("/coverage/resolve", methods=["POST"])
+def resolve_coverage_issue():
+    data = request.get_json(silent=True) or {}
+    try:
+        week_id = int(data.get("week_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Missing week"}), 400
+
+    section = (data.get("section") or "").strip()
+    date_key = (data.get("date") or "").strip()
+    issue = (data.get("issue") or "understaff").strip().lower()
+    if section not in {"Front Desk", "Shuttle", "Breakfast Bar", "Maintenance"} or issue != "understaff":
+        return jsonify({"ok": False, "error": "Unsupported coverage issue"}), 400
+    try:
+        dte = date.fromisoformat(date_key)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Bad date"}), 400
+
+    with SessionLocal() as s:
+        week = s.get(Week, week_id)
+        if not week:
+            return jsonify({"ok": False, "error": "Unknown week"}), 404
+        if dte < week.start_date or dte > week.start_date + timedelta(days=6):
+            return jsonify({"ok": False, "error": "Date outside of selected week"}), 400
+        existing = s.scalar(
+            select(CoverageResolution).where(
+                CoverageResolution.week_id == week_id,
+                CoverageResolution.section == section,
+                CoverageResolution.date == dte,
+                CoverageResolution.issue == issue,
+            )
+        )
+        resolved = False
+        if existing:
+            s.delete(existing)
+            s.commit()
+        else:
+            s.add(CoverageResolution(week_id=week_id, section=section, date=dte, issue=issue))
+            s.commit()
+            resolved = True
+
+    payload = {"ok": True, **coverage_payload_db(week_id)}
+    payload["coverage_resolution_toggle"] = {
+        "section": section,
+        "date": date_key,
+        "issue": issue,
+        "resolved": resolved,
+    }
+    _broadcast({"type": "coverage_resolution", "week_id": week_id, **payload})
+    return jsonify(payload)
 
 
 def _normalize_template_slot(raw_slot: Any) -> Optional[int]:
@@ -3871,12 +4727,14 @@ def upsert_aircrew_arrival():
         s.commit()
 
     batch = [{"carrier": carrier, "date": dk, "times": times, "week_id": week_id} for dk, times in response_cells.items()]
-    _broadcast({"type": "aircrew", "week_id": week_id, "batch": batch})
+    coverage_payload = coverage_payload_db(week_id)
+    _broadcast({"type": "aircrew", "week_id": week_id, "batch": batch, **coverage_payload})
     return jsonify({
         "ok": True,
         "carrier": carrier,
         "week_id": week_id,
         "cells": response_cells,
+        **coverage_payload,
     })
 
 
@@ -3988,7 +4846,7 @@ def import_aircrew_schedule():
     for wk_id, batch in per_week_batches.items():
         if batch:
             broadcast_batch = [{**item, "week_id": wk_id} for item in batch]
-            _broadcast({"type": "aircrew", "week_id": wk_id, "batch": broadcast_batch})
+            _broadcast({"type": "aircrew", "week_id": wk_id, "batch": broadcast_batch, **coverage_payload_db(wk_id)})
 
     warnings = warnings[:MAX_AIRCREW_IMPORT_WARNINGS]
     response = {
@@ -4000,6 +4858,8 @@ def import_aircrew_schedule():
         "warnings": warnings,
         "weeks_affected": sorted(per_week_batches.keys()),
     }
+    if display_week:
+        response.update(coverage_payload_db(display_week.id))
     if updated_cells == 0:
         response["message"] = "No changes were applied because the uploaded times match what is already saved."
     else:
@@ -4331,6 +5191,7 @@ def delete_timeoff(tid):
                 shuttle_missing,
                 shuttle_required,
                 shuttle_counts,
+                shuttle_missing_reasons,
                 bb_missing,
                 bb_required,
                 bb_counts,
@@ -4360,6 +5221,7 @@ def delete_timeoff(tid):
                 "shuttle_missing": shuttle_missing,
                 "shuttle_required": shuttle_required,
                 "shuttle_counts": shuttle_counts,
+                "shuttle_missing_reasons": shuttle_missing_reasons,
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
@@ -4379,6 +5241,7 @@ def delete_timeoff(tid):
                 "shuttle_missing": shuttle_missing,
                 "shuttle_required": shuttle_required,
                 "shuttle_counts": shuttle_counts,
+                "shuttle_missing_reasons": shuttle_missing_reasons,
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
@@ -4424,6 +5287,7 @@ def toggle_timeoff():
                 shuttle_missing,
                 shuttle_required,
                 shuttle_counts,
+                shuttle_missing_reasons,
                 bb_missing,
                 bb_required,
                 bb_counts,
@@ -4442,6 +5306,7 @@ def toggle_timeoff():
             shuttle_missing = {}
             shuttle_required = 0
             shuttle_counts = {}
+            shuttle_missing_reasons = {}
             bb_missing = {}
             bb_required = 0
             bb_counts = {}
@@ -4475,6 +5340,7 @@ def toggle_timeoff():
             "shuttle_missing": shuttle_missing,
             "shuttle_required": shuttle_required,
             "shuttle_counts": shuttle_counts,
+            "shuttle_missing_reasons": shuttle_missing_reasons,
             "bb_missing": bb_missing,
             "bb_required": bb_required,
             "bb_counts": bb_counts,
@@ -4495,6 +5361,7 @@ def toggle_timeoff():
         "shuttle_missing": shuttle_missing,
         "shuttle_required": shuttle_required,
         "shuttle_counts": shuttle_counts,
+        "shuttle_missing_reasons": shuttle_missing_reasons,
         "bb_missing": bb_missing,
         "bb_required": bb_required,
         "bb_counts": bb_counts,
@@ -4549,6 +5416,7 @@ def toggle_timeoff_vacation():
                 shuttle_missing,
                 shuttle_required,
                 shuttle_counts,
+                shuttle_missing_reasons,
                 bb_missing,
                 bb_required,
                 bb_counts,
@@ -4569,6 +5437,7 @@ def toggle_timeoff_vacation():
                 "shuttle_missing": shuttle_missing,
                 "shuttle_required": shuttle_required,
                 "shuttle_counts": shuttle_counts,
+                "shuttle_missing_reasons": shuttle_missing_reasons,
                 "bb_missing": bb_missing,
                 "bb_required": bb_required,
                 "bb_counts": bb_counts,
@@ -4958,6 +5827,220 @@ def _extract_responses_output_text(payload: dict[str, Any]) -> str:
     raise ValueError("OpenAI response did not contain structured output text.")
 
 
+def _coerce_excel_date(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
+
+
+def _cell_text(value: Any) -> str:
+    if value is None or isinstance(value, (date, datetime)):
+        return ""
+    return str(value).replace("\xa0", " ").strip()
+
+
+def _month_sheet_candidates(workbook, year: int, month: int) -> list:
+    month_name = date(year, month, 1).strftime("%B").casefold()
+    year_text = str(year)
+    exact = [
+        sheet for sheet in workbook.worksheets
+        if month_name in sheet.title.casefold() and year_text in sheet.title
+    ]
+    if exact:
+        return exact
+    month_only = [sheet for sheet in workbook.worksheets if month_name in sheet.title.casefold()]
+    return month_only or list(workbook.worksheets)
+
+
+def _extract_timeoff_calendar_cells(payload: bytes, year: int, month: int) -> list[dict[str, str]]:
+    workbook = load_workbook(io.BytesIO(payload), data_only=True, read_only=True)
+    cells: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for sheet in _month_sheet_candidates(workbook, year, month):
+        for row in range(1, sheet.max_row + 1):
+            for col in range(1, sheet.max_column + 1):
+                cell_date = _coerce_excel_date(sheet.cell(row=row, column=col).value)
+                if not cell_date or cell_date.year != year or cell_date.month != month:
+                    continue
+                note_parts = []
+                for note_row in range(row + 1, min(sheet.max_row, row + 3) + 1):
+                    below = sheet.cell(row=note_row, column=col).value
+                    if _coerce_excel_date(below):
+                        break
+                    text = _cell_text(below)
+                    if text:
+                        note_parts.append(text)
+                note = " / ".join(note_parts).strip()
+                if not note:
+                    continue
+                key = (cell_date.isoformat(), note.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                cells.append({
+                    "date": cell_date.isoformat(),
+                    "text": note,
+                    "sheet": sheet.title,
+                })
+    cells.sort(key=lambda item: item["date"])
+    return cells
+
+
+def _employee_import_context(session: Session) -> tuple[list[dict[str, str]], dict[str, list[Employee]]]:
+    employees = list(session.scalars(select(Employee).join(Section).order_by(func.lower(Employee.name), Section.name)))
+    context = []
+    by_name: dict[str, list[Employee]] = defaultdict(list)
+    for employee in employees:
+        section = employee.section or session.get(Section, employee.section_id)
+        role = section.name if section else ""
+        context.append({"name": employee.name, "role": role})
+        by_name[employee.name.casefold()].append(employee)
+    return context, by_name
+
+
+def _interpret_timeoff_import_cells(
+    *,
+    cells: list[dict[str, str]],
+    employees: list[dict[str, str]],
+    year: int,
+    month: int,
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    if not cells:
+        return [], ["No request notes were found for the selected month."], "No request notes found."
+    if not _openai_rule_interpreter_configured() or _openai_base_url() == "https://api.openai.com/v1":
+        raise RuntimeError("CLIProxy is not configured.")
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "requests": {
+                "type": "array",
+                "maxItems": 250,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "employee_name": {"type": "string"},
+                        "date": {"type": "string"},
+                        "request_type": {"type": "string", "enum": ["time_off", "vacation"]},
+                        "raw_text": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["employee_name", "date", "request_type", "raw_text", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "warnings": {"type": "array", "items": {"type": "string"}, "maxItems": 80},
+        },
+        "required": ["summary", "requests", "warnings"],
+        "additionalProperties": False,
+    }
+    context = {
+        "target_month": f"{year:04d}-{month:02d}",
+        "employees": employees,
+        "calendar_cells": cells,
+    }
+    headers = {"Content-Type": "application/json"}
+    api_key = _openai_rule_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    response = requests.post(
+        _openai_responses_url(),
+        headers=headers,
+        json={
+            "model": _openai_rule_model(),
+            "store": False,
+            "instructions": (
+                "Extract employee time-off requests from messy hotel calendar notes. "
+                "Use only exact employee names supplied in employees, but you may map obvious short names, casing, "
+                "or minor typos to those exact names when the match is clear, such as Rob to Robenson or merv to Merve. "
+                "Each returned request is for one employee on one date from calendar_cells. "
+                "Classify request_type as vacation when the note says vac, vacation, req vac, or vacation pay; otherwise "
+                "classify off, req off, requested off, n/a, or NA as time_off. "
+                "Ignore notes that are not time off, including back, back to work, open, birthday-only notes, and comments "
+                "without an off/vacation/unavailable signal. Do not invent names or dates. "
+                "If a cell contains several people separated by slashes, commas, or cramped text, return one request per person. "
+                "Keep warnings brief for skipped ambiguous names or text."
+            ),
+            "input": json.dumps(context),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "timeoff_import_extraction",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+            "max_output_tokens": 5000,
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    model_result = json.loads(_extract_responses_output_text(response.json()))
+    requests_out = model_result.get("requests") if isinstance(model_result.get("requests"), list) else []
+    warnings_out = [str(item).strip()[:240] for item in model_result.get("warnings") or [] if str(item).strip()]
+    summary = str(model_result.get("summary") or "Time-off requests extracted.").strip()[:240]
+    return requests_out, warnings_out, summary
+
+
+def _coalesce_timeoff_days(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, bool], set[date]] = defaultdict(set)
+    meta_by_employee: dict[int, dict[str, Any]] = {}
+    for item in items:
+        employee = item["employee"]
+        vacation = bool(item["vacation"])
+        grouped[(employee.id, vacation)].add(item["date"])
+        meta_by_employee[employee.id] = {"employee": employee, "role": item["role"]}
+    ranges: list[dict[str, Any]] = []
+    for (employee_id, vacation), days in grouped.items():
+        ordered = sorted(days)
+        if not ordered:
+            continue
+        start = previous = ordered[0]
+        for current in ordered[1:]:
+            if current == previous + timedelta(days=1):
+                previous = current
+                continue
+            ranges.append({
+                **meta_by_employee[employee_id],
+                "from_date": start,
+                "to_date": previous,
+                "vacation": vacation,
+            })
+            start = previous = current
+        ranges.append({
+            **meta_by_employee[employee_id],
+            "from_date": start,
+            "to_date": previous,
+            "vacation": vacation,
+        })
+    ranges.sort(key=lambda item: (item["from_date"], item["to_date"], item["employee"].name.casefold(), item["vacation"]))
+    return ranges
+
+
+def _timeoff_range_already_saved(
+    session: Session,
+    *,
+    name: str,
+    role: str,
+    start: date,
+    end: date,
+    vacation: bool,
+) -> bool:
+    existing = session.scalar(
+        select(TimeOff).where(
+            TimeOff.name == name,
+            TimeOff.role == role,
+            TimeOff.vacation.is_(vacation),
+            TimeOff.from_date <= start,
+            TimeOff.to_date >= end,
+        )
+    )
+    return existing is not None
+
+
 def _employee_ids_named(name: str, employees: list[Employee]) -> set[int]:
     normalized = (name or "").strip().casefold()
     return {employee.id for employee in employees if employee.name.casefold() == normalized}
@@ -5180,7 +6263,67 @@ def _restore_ai_undo_snapshot(session: Session, week_id: int, snapshot: list[dic
     session.commit()
 
 
-def ai_generate_week_schedule(week_id: int, instructions: str = "") -> dict[str, Any]:
+def _capture_generate_undo_snapshot(session: Session, start_week_id: int) -> Optional[dict[str, Any]]:
+    base_week = session.get(Week, start_week_id)
+    if not base_week:
+        return None
+    weeks: list[dict[str, Any]] = []
+    for week_offset in range(4):
+        start_date = base_week.start_date + timedelta(days=7 * week_offset)
+        week = session.scalar(select(Week).where(Week.start_date == start_date))
+        assignments: list[dict[str, Any]] = []
+        if week:
+            assignments = _capture_ai_undo_snapshot(session, week.id)
+        weeks.append(
+            {
+                "start_date": start_date,
+                "existed": week is not None,
+                "week_id": week.id if week else None,
+                "assignments": assignments,
+            }
+        )
+    return {
+        "week_id": start_week_id,
+        "base_start_date": base_week.start_date,
+        "weeks": weeks,
+    }
+
+
+def _restore_generate_undo_snapshot(session: Session, snapshot: dict[str, Any]) -> None:
+    for week_snapshot in snapshot.get("weeks", []):
+        start_date = week_snapshot["start_date"]
+        week = session.scalar(select(Week).where(Week.start_date == start_date))
+        if not week:
+            if not week_snapshot.get("existed"):
+                continue
+            week = Week(start_date=start_date)
+            session.add(week)
+            session.flush()
+
+        session.execute(delete(Assignment).where(Assignment.week_id == week.id))
+        if not week_snapshot.get("existed"):
+            session.delete(week)
+            continue
+
+        for row in week_snapshot.get("assignments", []):
+            assignment = Assignment(
+                id=row["id"],
+                week_id=week.id,
+                employee_id=row["employee_id"],
+                date=row["date"],
+                value=row["value"] or "Set",
+            )
+            if hasattr(assignment, "dismissed_timeoff"):
+                assignment.dismissed_timeoff = bool(row.get("dismissed_timeoff"))
+            session.add(assignment)
+    session.commit()
+
+
+def ai_generate_week_schedule(
+    week_id: int,
+    instructions: str = "",
+    selected_sections: Optional[set[str]] = None,
+) -> dict[str, Any]:
     """Fill only open cells in one week using assignment patterns since 2026.
 
     Any value other than ``Set`` is considered explicitly selected and is never
@@ -5237,6 +6380,7 @@ def ai_generate_week_schedule(week_id: int, instructions: str = "") -> dict[str,
             }
             return primary + [employee.id for employee in active_employees if employee.id in secondary_ids and employee.id not in primary]
 
+        allowed_sections = selected_sections or {"Front Desk", "Breakfast Bar", "Shuttle"}
         capable = {
             role: employees_for_section(role)
             for role in ("Front Desk", "Breakfast Bar", "Shuttle", "Maintenance")
@@ -5480,17 +6624,19 @@ def ai_generate_week_schedule(week_id: int, instructions: str = "") -> dict[str,
                 generated += 1
 
         for day in week_dates:
-            fill("Front Desk", "AM", 2, day, ["AM (6:00AM–2:00PM)", "AM (6:15AM–2:15PM)"])
-            fill("Front Desk", "PM", 2, day, ["PM (2:00PM–10:00PM)", "PM (2:15PM–10:15PM)"])
-            fill("Front Desk", "Audit", 2, day, ["Audit (10:00PM–6:00AM)", "Audit (10:15PM–6:15AM)"])
-            for breakfast_shift in ("5AM–12PM", "6AM–12PM", "7AM–12PM"):
-                fill("Breakfast Bar", breakfast_shift, 1, day, [breakfast_shift])
-            fill("Maintenance", "8AM–4:30PM", 1, day, ["8AM–4:30PM"])
-            fill("Shuttle", "AM", 1, day, ["AM (3:30AM–11:30AM)"])
-            fill("Shuttle", "Midday", 1, day, ["Midday (10:30AM–6:30PM)"])
-            fill("Shuttle", "PM", 1, day, [SHUTTLE_PM_LABEL])
-            crew_label = _suggest_shuttle_shift(_aircrew_minutes_for_day(s, week.id, day)) or DEFAULT_CREW_SHIFT
-            fill("Shuttle", "Crew", 1, day, [crew_label])
+            if "Front Desk" in allowed_sections:
+                fill("Front Desk", "AM", 2, day, ["AM (6:00AM–2:00PM)", "AM (6:15AM–2:15PM)"])
+                fill("Front Desk", "PM", 2, day, ["PM (2:00PM–10:00PM)", "PM (2:15PM–10:15PM)"])
+                fill("Front Desk", "Audit", 2, day, ["Audit (10:00PM–6:00AM)", "Audit (10:15PM–6:15AM)"])
+            if "Breakfast Bar" in allowed_sections:
+                for breakfast_shift in ("5AM–12PM", "6AM–12PM", "7AM–12PM"):
+                    fill("Breakfast Bar", breakfast_shift, 1, day, [breakfast_shift])
+            if "Shuttle" in allowed_sections:
+                fill("Shuttle", "AM", 1, day, ["AM (3:30AM–11:30AM)"])
+                fill("Shuttle", "Midday", 1, day, ["Midday (10:30AM–6:30PM)"])
+                fill("Shuttle", "PM", 1, day, [SHUTTLE_PM_LABEL])
+                crew_label = _suggest_shuttle_shift(_aircrew_minutes_for_day(s, week.id, day)) or DEFAULT_CREW_SHIFT
+                fill("Shuttle", "Crew", 1, day, [crew_label])
 
         s.commit()
         return {
@@ -5690,7 +6836,21 @@ def _is_available(emp_id: int, role: str, shift_label: str, dte: date, avail_idx
     if not allowed:
         return False
     dow = dte.weekday()  # 0=Mon
-    if role == "Front Desk":
+    if role == "Shuttle":
+        time_ranges = [
+            parsed
+            for range_day, value in allowed
+            if range_day == dow
+            for parsed in [_parse_shuttle_availability_range(value)]
+            if parsed is not None
+        ]
+        if time_ranges:
+            shift_start, shift_end = _shift_window_minutes(shift_label)
+            if shift_start is None or shift_end is None:
+                return False
+            return any(range_start <= shift_start and shift_end <= range_end for range_start, range_end in time_ranges)
+        key = (dow, shift_label)
+    elif role == "Front Desk":
         key = (dow, _fd_variant(shift_label))
     else:
         key = (dow, shift_label)
@@ -6119,26 +7279,96 @@ def generate_4_week_schedule(start_week_id: int):
 @app.route("/generate", methods=["POST", "GET"]) 
 def generate():
     with SessionLocal() as s:
-        week = s.scalar(select(Week).where(Week.start_date == date(2025, 9, 18)))
+        start = week_start_for_date(date.today())
+        week = s.scalar(select(Week).where(Week.start_date == start))
+        if not week:
+            week = _ensure_week_and_assignments(s, start)
+            s.commit()
         week_id = week.id
+        snapshot = _capture_generate_undo_snapshot(s, week_id)
     generate_4_week_schedule(week_id)
-    return redirect(url_for("index"))
+    redirect_args = {"generated": 1}
+    if snapshot:
+        _prune_expired_generate_undos()
+        for existing_token, payload in list(_pending_generate_undos.items()):
+            if payload.get("week_id") == week_id:
+                _pending_generate_undos.pop(existing_token, None)
+        undo_token = uuid.uuid4().hex
+        _pending_generate_undos[undo_token] = {
+            **snapshot,
+            "expires": time.time() + GENERATE_UNDO_SECONDS,
+        }
+        redirect_args["generate_undo"] = undo_token
+    return redirect(url_for("index", **redirect_args))
 
 
 @app.route("/week/<int:week_id>/generate", methods=["POST"]) 
 def generate_week(week_id: int):
+    with SessionLocal() as s:
+        if not s.get(Week, week_id):
+            return "Week not found", 404
+        snapshot = _capture_generate_undo_snapshot(s, week_id)
     generate_4_week_schedule(week_id)
-    return redirect(url_for("view_week", week_id=week_id))
+    redirect_args = {"generated": 1}
+    if snapshot:
+        _prune_expired_generate_undos()
+        for existing_token, payload in list(_pending_generate_undos.items()):
+            if payload.get("week_id") == week_id:
+                _pending_generate_undos.pop(existing_token, None)
+        undo_token = uuid.uuid4().hex
+        _pending_generate_undos[undo_token] = {
+            **snapshot,
+            "expires": time.time() + GENERATE_UNDO_SECONDS,
+        }
+        redirect_args["generate_undo"] = undo_token
+    return redirect(url_for("view_week", week_id=week_id, **redirect_args))
+
+
+@app.route("/week/<int:week_id>/generate/undo", methods=["POST"])
+def undo_generate_week(week_id: int):
+    _prune_expired_generate_undos()
+    undo_token = (request.form.get("undo_token") or "").strip()
+    payload = _pending_generate_undos.get(undo_token)
+    if not payload or payload.get("week_id") != week_id:
+        return redirect(url_for("view_week", week_id=week_id))
+    with SessionLocal() as s:
+        _restore_generate_undo_snapshot(s, payload)
+    _pending_generate_undos.pop(undo_token, None)
+    return redirect(url_for("view_week", week_id=week_id, generate_undone=1))
 
 
 @app.route("/week/<int:week_id>/ai-generate", methods=["POST"])
 def ai_generate_week(week_id: int):
     instructions = (request.form.get("ai_instructions") or "").strip()[:2000]
+    allowed_ai_sections = {"Front Desk", "Shuttle", "Breakfast Bar"}
+    selected_sections = {
+        section
+        for section in request.form.getlist("ai_sections")
+        if section in allowed_ai_sections
+    }
+    if not selected_sections:
+        if request.form.get("ai_section_filter"):
+            return redirect(
+                url_for(
+                    "view_week",
+                    week_id=week_id,
+                    ai_generated=0,
+                    ai_locked=0,
+                    ai_rules=0,
+                    ai_interpreter="none",
+                    ai_interpretation="No departments selected.",
+                )
+            )
+        selected_sections = set(allowed_ai_sections)
     with SessionLocal() as s:
         if not s.get(Week, week_id):
             return "Week not found", 404
         snapshot = _capture_ai_undo_snapshot(s, week_id)
-    result = ai_generate_week_schedule(week_id, instructions=instructions)
+    result = ai_generate_week_schedule(
+        week_id,
+        instructions=instructions,
+        selected_sections=selected_sections,
+    )
     _prune_expired_ai_undos()
     for existing_token, payload in list(_pending_ai_undos.items()):
         if payload.get("week_id") == week_id:
@@ -6724,6 +7954,7 @@ def export_shuttle_aircrew_excel(week_id: int):
         f"Shuttle-Aircrew {month_abbrev(week_start)} {week_start.day} - "
         f"{month_abbrev(period_end)} {period_end.day}.xlsx"
     )
+    _notify_schedule_export("Shuttle/aircrew schedule", week_start, period_end)
     return send_file(
         output,
         as_attachment=True,
@@ -7520,7 +8751,8 @@ def export_schedule_excel(week_id: int):
             return 'Sept' if d.month == 9 and abbr == 'Sep' else abbr
         end_date = week.start_date + timedelta(days=6)
         filename = f"{month_abbrev(week.start_date)} {week.start_date.day} - {month_abbrev(end_date)} {end_date.day}.xlsx"
-        
+
+        _notify_schedule_export("Full schedule", week.start_date, end_date)
         return send_file(
             output,
             as_attachment=True,

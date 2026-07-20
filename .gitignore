@@ -5,6 +5,7 @@ schedule.test.db
 log.txt
 .env
 old_schedule_templates/
+database_backups/
 /static/whatsapp-media/*
 __pycache__/*
 docs/discord.md
